@@ -452,11 +452,12 @@ public:
         if (d_boundsReduction) cudaFree(d_boundsReduction);
     }
 
-    void build(const TriangleMesh& tris) {
+    // PHASE 1: Data Upload (Not part of compute benchmark)
+    void prepareData(const TriangleMesh& tris) {
         numTriangles = tris.size();
         if (numTriangles == 0) return;
 
-        // 1. Allocate and Upload Data
+        // Allocate and Upload Data
         size_t floatSize = numTriangles * sizeof(float);
 
         CUDA_CHECK(cudaMalloc(&d_v0x, floatSize));
@@ -492,56 +493,55 @@ public:
         // Reset atomic flags to 0
         kFillZero<<<gridSize, blockSize>>>(d_atomicFlags, 2 * numTriangles - 1);
         CUDA_CHECK(cudaDeviceSynchronize());
+    }
 
-        // 2. Compute Bounds and Centroids
+    // PHASE 2: Pure Compute (Benchmarked)
+    void runCompute() {
+        if (numTriangles == 0) return;
+
+        int blockSize = 256;
+        int gridSize = (numTriangles + blockSize - 1) / blockSize;
+
+        // 1. Compute Bounds and Centroids
         kComputeBoundsAndCentroids<<<gridSize, blockSize>>>(
             getDevicePtrs(), numTriangles, d_triBBoxes, d_centroids);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // 3. Reduce scene bounds
+        // 2. Reduce scene bounds
         int numBlocks = gridSize;
         CUDA_CHECK(cudaMalloc(&d_boundsReduction, numBlocks * sizeof(AABB_cw)));
 
         kReduceBounds_Step1<<<numBlocks, blockSize>>>(d_triBBoxes, d_boundsReduction, numTriangles);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
         // Final reduction on single block
         if (numBlocks > 1) {
             kReduceBounds_Step2<<<1, blockSize>>>(d_boundsReduction, numBlocks);
-            CUDA_CHECK(cudaDeviceSynchronize());
         }
 
         // Copy final result back
         AABB_cw sceneBounds;
         CUDA_CHECK(cudaMemcpy(&sceneBounds, d_boundsReduction, sizeof(AABB_cw), cudaMemcpyDeviceToHost));
 
-        // 4. Compute Morton Codes
+        // 3. Compute Morton Codes
         kComputeMortonCodes<<<gridSize, blockSize>>>(
             d_centroids, numTriangles, sceneBounds, d_mortonCodes, d_indices);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // 5. Sort (Radix Sort)
+        // 4. Sort (Radix Sort)
         thrust::device_ptr<uint32_t> mortonPtr(d_mortonCodes);
         thrust::device_ptr<uint32_t> indicesPtr(d_indices);
         thrust::sort_by_key(mortonPtr, mortonPtr + numTriangles, indicesPtr);
 
-        // 6. Build Hierarchy
+        // 5. Build Hierarchy
         int internalGridSize = (numTriangles - 1 + blockSize - 1) / blockSize;
         kBuildInternalNodes<<<internalGridSize, blockSize>>>(
             d_mortonCodes, d_indices, d_nodes, numTriangles);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // 7. Init Leaves
+        // 6. Init Leaves
         kInitLeafNodes<<<gridSize, blockSize>>>(
             d_nodes, d_triBBoxes, d_indices, numTriangles);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // 8. Refit BBoxes (Bottom Up)
+        // 7. Refit BBoxes (Bottom Up)
         kRefitHierarchy<<<gridSize, blockSize>>>(
             d_nodes, d_atomicFlags, numTriangles);
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        std::cout << "BVH Build Complete on GPU. Nodes: " << (2*numTriangles-1) << std::endl;
     }
 
     // Helper to verify root bounds on host
@@ -702,22 +702,34 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Build BVH
     LBVHBuilderCUDA builder;
+
+    // 1. Prepare Data (Allocation + Copy) - NOT TIMED
+    std::cout << "Uploading data to GPU and allocating memory..." << std::endl;
+    builder.prepareData(mesh);
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
+    std::cout << "Starting build..." << std::endl;
     cudaEventRecord(start);
-    builder.build(mesh);
-    cudaEventRecord(stop);
 
+    // 2. Run Compute - TIMED
+    builder.runCompute();
+
+    cudaEventRecord(stop);
     cudaEventSynchronize(stop);
+
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
-    std::cout << "Build Time: " << milliseconds << " ms" << std::endl;
+    std::cout << "------------------------------------------------" << std::endl;
+    std::cout << "Triangles: " << mesh.size() << std::endl;
+    std::cout << "Compute Time: " << milliseconds << " ms" << std::endl;
+    std::cout << "Throughput: " << (mesh.size() / 1000000.0f) / (milliseconds / 1000.0f) << " MTris/s" << std::endl;
+    std::cout << "------------------------------------------------" << std::endl;
+
     builder.verify();
 
     // Export BVH if output file specified
