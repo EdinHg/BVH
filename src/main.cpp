@@ -12,10 +12,18 @@
 #include "benchmark/timer.hpp"
 #include "benchmark/sah_cost.hpp"
 
+#ifdef USE_CUDA
+#include "bvh/lbvh_cuda_builder.hpp"
+#endif
+
 void printUsage(const char* program) {
     std::cerr << "Usage: " << program << " <model.obj> [options]\n";
     std::cerr << "Options:\n";
-    std::cerr << "  --lbvh           Use LBVH (Morton code) builder\n";
+    std::cerr << "  --lbvh           Use CPU LBVH (Morton code) builder\n";
+#ifdef USE_CUDA
+    std::cerr << "  --cuda           Use CUDA LBVH builder\n";
+    std::cerr << "  --compare        Compare CPU LBVH vs CUDA LBVH\n";
+#endif
     std::cerr << "  --export         Export BVH bounding boxes to <model>_bvh.obj\n";
     std::cerr << "  --export-leaves  Export only leaf bounding boxes\n";
 }
@@ -31,12 +39,18 @@ int main(int argc, char* argv[]) {
     bool doExport = false;
     bool leavesOnly = false;
     bool useLBVH = false;
+    bool useCUDA = false;
+    bool compareMode = false;
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--export") doExport = true;
         else if (arg == "--export-leaves") { doExport = true; leavesOnly = true; }
         else if (arg == "--lbvh") useLBVH = true;
+#ifdef USE_CUDA
+        else if (arg == "--cuda") useCUDA = true;
+        else if (arg == "--compare") compareMode = true;
+#endif
     }
 
     // Load mesh
@@ -57,7 +71,21 @@ int main(int argc, char* argv[]) {
 
     // Register builders
     std::vector<std::unique_ptr<BVHBuilder>> builders;
-    if (useLBVH) {
+    
+    if (compareMode) {
+        // Compare mode: run both CPU and CUDA LBVH
+        builders.push_back(std::make_unique<LBVHBuilder>());
+#ifdef USE_CUDA
+        builders.push_back(std::make_unique<LBVHBuilderCUDA>());
+#endif
+    } else if (useCUDA) {
+#ifdef USE_CUDA
+        builders.push_back(std::make_unique<LBVHBuilderCUDA>());
+#else
+        std::cerr << "Error: CUDA support not compiled in\n";
+        return 1;
+#endif
+    } else if (useLBVH) {
         builders.push_back(std::make_unique<LBVHBuilder>());
     } else {
         builders.push_back(std::make_unique<RecursiveBVH>(4));
