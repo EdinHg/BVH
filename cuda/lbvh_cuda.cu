@@ -8,11 +8,10 @@
 #include <iomanip>
 #include <string>
 
-// CUDA includes
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
-// Thrust (C++ STL-like library for CUDA)
+// Thrust headers
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
@@ -21,11 +20,16 @@
 #include <thrust/reduce.h>
 #include <thrust/extrema.h>
 
-// Project includes for OBJ loading/exporting
+// CUB headers for optimized sorting
+#include <cub/cub.cuh>
+
 #include "../src/mesh/obj_loader.hpp"
 #include "../src/bvh/bvh_export.hpp"
 
-// --- Minimal Geometry Definitions for Standalone Compilation ---
+// =================================================================================
+// DATA STRUCTURES
+// =================================================================================
+
 struct __align__(16) float3_cw {
     float x, y, z;
     __host__ __device__ float3_cw() : x(0), y(0), z(0) {}
@@ -46,19 +50,17 @@ struct __align__(16) AABB_cw {
 
 struct LBVHNode {
     AABB_cw bbox;
-    uint32_t leftChild;  // Leaf if (leftChild & 0x80000000)
+    uint32_t leftChild;  
     uint32_t rightChild;
-    uint32_t parent;     // Needed for bottom-up traversal
+    uint32_t parent;     
 };
 
-// Device-side pointers for Triangles (Passed to kernels)
 struct TrianglesSoADevice {
     float *v0x, *v0y, *v0z;
     float *v1x, *v1y, *v1z;
     float *v2x, *v2y, *v2z;
 };
 
-// Error checking macro
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = call; \
@@ -69,11 +71,10 @@ struct TrianglesSoADevice {
         } \
     } while (0)
 
-// ------------------------------------------------------------------
-// Device Functions: Morton Codes
-// ------------------------------------------------------------------
+// =================================================================================
+// DEVICE HELPER FUNCTIONS
+// =================================================================================
 
-// Expands a 10-bit integer into 30 bits by inserting 2 zeros after each bit.
 __device__ __forceinline__ uint32_t expandBits(uint32_t v) {
     v = (v * 0x00010001u) & 0xFF0000FFu;
     v = (v * 0x00000101u) & 0x0F00F00Fu;
@@ -82,7 +83,6 @@ __device__ __forceinline__ uint32_t expandBits(uint32_t v) {
     return v;
 }
 
-// Calculates a 30-bit Morton code for the given 3D point located within the unit cube [0,1].
 __device__ __forceinline__ uint32_t morton3D(float x, float y, float z) {
     x = fminf(fmaxf(x * 1024.0f, 0.0f), 1023.0f);
     y = fminf(fmaxf(y * 1024.0f, 0.0f), 1023.0f);
@@ -93,51 +93,50 @@ __device__ __forceinline__ uint32_t morton3D(float x, float y, float z) {
     return xx * 4 + yy * 2 + zz;
 }
 
-// ------------------------------------------------------------------
-// Device Functions: Tree Topology Logic (Karras 2012)
-// ------------------------------------------------------------------
-
 __device__ __forceinline__ int clz_custom(uint32_t x) {
     return x == 0 ? 32 : __clz(x);
 }
 
-// Calculates the length of the longest common prefix between two keys.
-__device__ int delta(const uint32_t* sortedMortonCodes, const uint32_t* sortedIndices, int numObjects, int i, int j) {
+// OPTIMIZED DELTA: Reads selfCode/selfIdx from registers, only 'j' from global memory
+__device__ int delta_cached(
+    uint32_t selfCode, 
+    uint32_t selfIdx, 
+    const uint32_t* sortedMortonCodes, 
+    const uint32_t* sortedIndices, 
+    int numObjects, 
+    int i, 
+    int j) 
+{
     if (j < 0 || j >= numObjects) return -1;
     
-    uint32_t codeI = sortedMortonCodes[i];
+    // We only incur one global memory read here
     uint32_t codeJ = sortedMortonCodes[j];
     
-    if (codeI == codeJ) {
-        // Use indices to disambiguate identical Morton codes
-        uint32_t idxI = sortedIndices[i];
+    if (selfCode == codeJ) {
         uint32_t idxJ = sortedIndices[j];
-        return 32 + clz_custom(idxI ^ idxJ);
+        return 32 + clz_custom(selfIdx ^ idxJ);
     }
-    return clz_custom(codeI ^ codeJ);
+    return clz_custom(selfCode ^ codeJ);
 }
 
-// ------------------------------------------------------------------
-// Kernels
-// ------------------------------------------------------------------
+// =================================================================================
+// KERNELS
+// =================================================================================
 
-// 1. Compute Centroids and Scene Bounds (Atomic Reduction)
 __global__ void kComputeBoundsAndCentroids(
     TrianglesSoADevice tris, 
     int n, 
     AABB_cw* triBBoxes, 
     float3_cw* centroids, 
-    AABB_cw* globalBoundsBlock) // Shared memory reduction usually better, but keeping simple
+    AABB_cw* globalBoundsBlock) 
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    // Load triangle vertices
     float3_cw v0(tris.v0x[i], tris.v0y[i], tris.v0z[i]);
     float3_cw v1(tris.v1x[i], tris.v1y[i], tris.v1z[i]);
     float3_cw v2(tris.v2x[i], tris.v2y[i], tris.v2z[i]);
 
-    // Compute Triangle AABB
     float3_cw minVal, maxVal;
     minVal.x = fminf(v0.x, fminf(v1.x, v2.x));
     minVal.y = fminf(v0.y, fminf(v1.y, v2.y));
@@ -149,11 +148,9 @@ __global__ void kComputeBoundsAndCentroids(
     triBBoxes[i].min = minVal;
     triBBoxes[i].max = maxVal;
 
-    // Compute Centroid
     centroids[i] = (minVal + maxVal) * 0.5f;
 }
 
-// 2. Compute Morton Codes
 __global__ void kComputeMortonCodes(
     const float3_cw* centroids, 
     int n, 
@@ -177,7 +174,6 @@ __global__ void kComputeMortonCodes(
     indices[i] = i;
 }
 
-// 3. Build Internal Nodes (Topology)
 __global__ void kBuildInternalNodes(
     const uint32_t* sortedMortonCodes,
     const uint32_t* sortedIndices,
@@ -185,33 +181,32 @@ __global__ void kBuildInternalNodes(
     int numObjects)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numObjects - 1) return; // Run for N-1 internal nodes
+    if (i >= numObjects - 1) return; 
 
-    // Determine direction of the range (+1 or -1)
-    int d = (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + 1) - 
-             delta(sortedMortonCodes, sortedIndices, numObjects, i, i - 1)) >= 0 ? 1 : -1;
+    // REGISTER CACHING OPTIMIZATION
+    uint32_t selfCode = sortedMortonCodes[i];
+    uint32_t selfIdx = sortedIndices[i];
 
-    // Compute lower bound of the length of the range
-    int min_delta = delta(sortedMortonCodes, sortedIndices, numObjects, i, i - d);
+    int d = (delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i + 1) - 
+             delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i - 1)) >= 0 ? 1 : -1;
+
+    int min_delta = delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i - d);
     int l_max = 2;
-    while (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + l_max * d) > min_delta) {
+    while (delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i + l_max * d) > min_delta) {
         l_max *= 2;
     }
 
-    // Find the other end of the range using binary search
     int l = 0;
     for (int t = l_max / 2; t >= 1; t /= 2) {
-        if (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + (l + t) * d) > min_delta) {
+        if (delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i + (l + t) * d) > min_delta) {
             l += t;
         }
     }
     int j = i + l * d;
 
-    // Find the split position using binary search
-    int delta_node = delta(sortedMortonCodes, sortedIndices, numObjects, i, j);
+    int delta_node = delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, j);
     int s = 0;
     
-    // Divide work based on direction
     int first, last;
     if (d > 0) { first = i; last = j; }
     else       { first = j; last = i; }
@@ -219,37 +214,30 @@ __global__ void kBuildInternalNodes(
     int len = last - first;
     int t = len;
     
-    // Common prefix of the range
-    // Efficient binary search to find split
     do {
         t = (t + 1) >> 1;
-        if (delta(sortedMortonCodes, sortedIndices, numObjects, first, first + s + t) > delta_node) {
+        if (delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, first, first + s + t) > delta_node) {
             s += t;
         }
     } while (t > 1);
     
     int split = first + s;
 
-    // Output children
     uint32_t leftIdx, rightIdx;
     
-    // Left Child
-    if (split == first) leftIdx = (numObjects - 1) + split; // Leaf
-    else                leftIdx = split;                   // Internal
+    if (split == first) leftIdx = (numObjects - 1) + split; 
+    else                leftIdx = split;                    
 
-    // Right Child
-    if (split + 1 == last) rightIdx = (numObjects - 1) + split + 1; // Leaf
-    else                   rightIdx = split + 1;                   // Internal
+    if (split + 1 == last) rightIdx = (numObjects - 1) + split + 1; 
+    else                   rightIdx = split + 1;                    
 
     nodes[i].leftChild = leftIdx;
     nodes[i].rightChild = rightIdx;
     
-    // Set parents
     nodes[leftIdx].parent = i;
     nodes[rightIdx].parent = i;
 }
 
-// 4. Initialize Leaf Nodes
 __global__ void kInitLeafNodes(
     LBVHNode* nodes, 
     const AABB_cw* triBBoxes, 
@@ -259,17 +247,14 @@ __global__ void kInitLeafNodes(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numObjects) return;
 
-    int leafIdx = (numObjects - 1) + i; // Leaves are stored after internal nodes
+    int leafIdx = (numObjects - 1) + i; 
     uint32_t originalIndex = sortedIndices[i];
 
-    // Store BBox
     nodes[leafIdx].bbox = triBBoxes[originalIndex];
-    // Mark as leaf using high bit or just rely on structure
     nodes[leafIdx].leftChild = originalIndex | 0x80000000; 
     nodes[leafIdx].rightChild = 0xFFFFFFFF;
 }
 
-// 5. Compute Bounding Boxes (Bottom-Up)
 __global__ void kRefitHierarchy(
     LBVHNode* nodes, 
     int* atomicCounters, 
@@ -278,25 +263,17 @@ __global__ void kRefitHierarchy(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numObjects) return;
 
-    // Start at leaf
     uint32_t idx = (numObjects - 1) + i;
     
-    // Walk up the tree
-    while (idx != 0) { // While not root
+    while (idx != 0) { 
         uint32_t parent = nodes[idx].parent;
         
-        // Atomic increment: returns old value
-        // 0 -> First thread arriving. Terminate.
-        // 1 -> Second thread arriving. Process node.
-        int oldVal = atomicAdd(&atomicCounters[parent], 1);
+       int oldVal = atomicAdd(&atomicCounters[parent], 1);
         
         if (oldVal == 0) {
-            // First child arrived, exit. 
-            // The second child will process the parent.
-            return;
+           return;
         }
 
-        // Processing parent (merging children)
         uint32_t left = nodes[parent].leftChild;
         uint32_t right = nodes[parent].rightChild;
 
@@ -312,10 +289,8 @@ __global__ void kRefitHierarchy(
         unionBox.max.y = fmaxf(leftBox.max.y, rightBox.max.y);
         unionBox.max.z = fmaxf(leftBox.max.z, rightBox.max.z);
 
-        // Store result
         nodes[parent].bbox = unionBox;
 
-        // Move up
         idx = parent;
     }
 }
@@ -333,22 +308,28 @@ struct AABBReduce {
     }
 };
 
-// ------------------------------------------------------------------
-// Host Builder Class
-// ------------------------------------------------------------------
+// =================================================================================
+// BUILDER CLASS
+// =================================================================================
 
 class LBVHBuilderCUDA {
 private:
-    // Device Memory containers
     thrust::device_vector<float> d_v0x, d_v0y, d_v0z;
     thrust::device_vector<float> d_v1x, d_v1y, d_v1z;
     thrust::device_vector<float> d_v2x, d_v2y, d_v2z;
     
     thrust::device_vector<AABB_cw> d_triBBoxes;
     thrust::device_vector<float3_cw> d_centroids;
+    
+    // Primary buffers for sort
     thrust::device_vector<uint32_t> d_mortonCodes;
     thrust::device_vector<uint32_t> d_indices;
     
+    // CUB specific: Secondary buffers for ping-pong sort
+    thrust::device_vector<uint32_t> d_mortonCodes_alt;
+    thrust::device_vector<uint32_t> d_indices_alt;
+    thrust::device_vector<uint8_t>  d_cub_temp_storage;
+
     thrust::device_vector<LBVHNode> d_nodes;
     thrust::device_vector<int> d_atomicFlags;
 
@@ -361,62 +342,78 @@ private:
     }
 
 public:
-    void build(const TriangleMesh& tris) {
+    // PHASE 1: Data Upload (Not part of compute benchmark)
+    void prepareData(const TriangleMesh& tris) {
         int n = tris.size();
         if (n == 0) return;
 
-        // 1. Upload Data
+        // Copy data to GPU (Heavy PCIe transfer)
         d_v0x = tris.v0x; d_v0y = tris.v0y; d_v0z = tris.v0z;
         d_v1x = tris.v1x; d_v1y = tris.v1y; d_v1z = tris.v1z;
         d_v2x = tris.v2x; d_v2y = tris.v2y; d_v2z = tris.v2z;
 
+        // Allocate buffers (Heavy OS operation)
         d_triBBoxes.resize(n);
         d_centroids.resize(n);
         d_mortonCodes.resize(n);
         d_indices.resize(n);
+        d_mortonCodes_alt.resize(n);
+        d_indices_alt.resize(n);
         d_nodes.resize(2 * n - 1);
         d_atomicFlags.resize(2 * n - 1);
         
-        // Reset atomic flags to 0
         thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
+    }
 
+    // PHASE 2: Pure Compute (Benchmarked)
+    void runCompute(int n) {
+        if (n == 0) return;
+        
         int blockSize = 256;
         int gridSize = (n + blockSize - 1) / blockSize;
 
-        // 2. Compute Bounds and Centroids
+        // 1. Compute Bounds
         kComputeBoundsAndCentroids<<<gridSize, blockSize>>>(getDevicePtrs(), n, 
             thrust::raw_pointer_cast(d_triBBoxes.data()), 
             thrust::raw_pointer_cast(d_centroids.data()), 
             nullptr);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // Reduction for scene bounds
-        // Using Thrust for global reduction (easier than writing custom kernel)
-        // Transform centroids to min/max components then reduce
-        // For simplicity in this demo, we will download centroids to find bounds (or use a simple reduction)
-        // Ideally: Use thrust::transform_reduce.
-        
-        // Simplified: Transform AABBs to scene bounds
+        // 2. Reduce Bounds
         AABB_cw init; 
         init.min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
         init.max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-
-        // This is a rough way to do it with thrust, usually you write a custom reduction kernel
-        // For brevity/correctness in demo, we'll assume a kernel did it or copy back small data
-        // Let's implement a quick GPU reduction via thrust
-
         AABB_cw sceneBounds = thrust::reduce(d_triBBoxes.begin(), d_triBBoxes.end(), init, AABBReduce());
 
-        // 3. Compute Morton Codes
+        // 3. Morton Codes
         kComputeMortonCodes<<<gridSize, blockSize>>>(
             thrust::raw_pointer_cast(d_centroids.data()), 
             n, sceneBounds, 
             thrust::raw_pointer_cast(d_mortonCodes.data()), 
             thrust::raw_pointer_cast(d_indices.data()));
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // 4. Sort (Radix Sort via Thrust)
-        thrust::sort_by_key(d_mortonCodes.begin(), d_mortonCodes.end(), d_indices.begin());
+        // 4. CUB Radix Sort
+        void* d_temp_storage = nullptr;
+        size_t temp_storage_bytes = 0;
+        
+        uint32_t* d_keys_in = thrust::raw_pointer_cast(d_mortonCodes.data());
+        uint32_t* d_keys_out = thrust::raw_pointer_cast(d_mortonCodes_alt.data());
+        uint32_t* d_values_in = thrust::raw_pointer_cast(d_indices.data());
+        uint32_t* d_values_out = thrust::raw_pointer_cast(d_indices_alt.data());
+
+        // Determine size
+        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys_in, d_keys_out, d_values_in, d_values_out, n, 0, 30);
+        
+        if(d_cub_temp_storage.size() < temp_storage_bytes) {
+            d_cub_temp_storage.resize(temp_storage_bytes);
+        }
+        d_temp_storage = thrust::raw_pointer_cast(d_cub_temp_storage.data());
+
+        // Run Sort
+        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys_in, d_keys_out, d_values_in, d_values_out, n, 0, 30);
+        
+        // Swap pointers/vectors so d_mortonCodes holds the sorted result
+        d_mortonCodes.swap(d_mortonCodes_alt);
+        d_indices.swap(d_indices_alt);
 
         // 5. Build Hierarchy
         kBuildInternalNodes<<<gridSize, blockSize>>>(
@@ -424,7 +421,6 @@ public:
             thrust::raw_pointer_cast(d_indices.data()),
             thrust::raw_pointer_cast(d_nodes.data()),
             n);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
         // 6. Init Leaves
         kInitLeafNodes<<<gridSize, blockSize>>>(
@@ -432,19 +428,14 @@ public:
             thrust::raw_pointer_cast(d_triBBoxes.data()),
             thrust::raw_pointer_cast(d_indices.data()),
             n);
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        // 7. Refit BBoxes (Bottom Up)
+        // 7. Refit
         kRefitHierarchy<<<gridSize, blockSize>>>(
             thrust::raw_pointer_cast(d_nodes.data()),
             thrust::raw_pointer_cast(d_atomicFlags.data()),
             n);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        
-        std::cout << "BVH Build Complete on GPU. Nodes: " << (2*n-1) << std::endl;
     }
 
-    // Helper to verify root bounds on host
     void verify() {
         if(d_nodes.empty()) return;
         LBVHNode root = d_nodes[0];
@@ -453,7 +444,6 @@ public:
                   << "[" << root.bbox.max.x << ", " << root.bbox.max.y << ", " << root.bbox.max.z << "]\n";
     }
 
-    // Get BVH nodes for export (converts to BVHNode format)
     std::vector<BVHNode> getNodes() const {
         std::vector<LBVHNode> hostNodes(d_nodes.begin(), d_nodes.end());
         std::vector<BVHNode> result;
@@ -465,14 +455,13 @@ public:
             bvhNode.bounds.min = Vec3(node.bbox.min.x, node.bbox.min.y, node.bbox.min.z);
             bvhNode.bounds.max = Vec3(node.bbox.max.x, node.bbox.max.y, node.bbox.max.z);
             
-            // Check if this is a leaf node (high bit set in leftChild)
             if (node.leftChild & 0x80000000) {
-                bvhNode.childCount = 0;  // Leaf
-                bvhNode.primOffset = node.leftChild & 0x7FFFFFFF;  // Strip high bit
+                bvhNode.childCount = 0;  
+                bvhNode.primOffset = node.leftChild & 0x7FFFFFFF;  
                 bvhNode.primCount = 1;
             } else {
-                bvhNode.childCount = 2;  // Binary internal node
-                bvhNode.childOffset = node.leftChild;  // Left child index
+                bvhNode.childCount = 2;  
+                bvhNode.childOffset = node.leftChild;  
                 bvhNode.primCount = 0;
             }
             bvhNode.axis = 0;
@@ -482,9 +471,9 @@ public:
     }
 };
 
-// ------------------------------------------------------------------
-// Command-line argument parsing
-// ------------------------------------------------------------------
+// =================================================================================
+// HELPER FUNCTIONS
+// =================================================================================
 
 void printUsage(const char* programName) {
     std::cout << "Usage: " << programName << " [options]\n"
@@ -493,16 +482,8 @@ void printUsage(const char* programName) {
               << "  -o, --output <file.obj>   Output OBJ file for BVH export\n"
               << "  -n, --triangles <count>   Number of random triangles (default: 10000000)\n"
               << "  -l, --leaves-only         Export only leaf node bounding boxes\n"
-              << "  -h, --help                Show this help message\n"
-              << "\nExamples:\n"
-              << "  " << programName << " -i model.obj -o bvh.obj\n"
-              << "  " << programName << " -n 1000000 -o bvh.obj\n"
-              << "  " << programName << " -i model.obj -o bvh.obj -l\n";
+              << "  -h, --help                Show this help message\n";
 }
-
-// ------------------------------------------------------------------
-// Random triangle generation
-// ------------------------------------------------------------------
 
 TriangleMesh generateRandomTriangles(int n) {
     TriangleMesh mesh;
@@ -523,65 +504,38 @@ TriangleMesh generateRandomTriangles(int n) {
     return mesh;
 }
 
-// ------------------------------------------------------------------
-// Main / Test
-// ------------------------------------------------------------------
+// =================================================================================
+// MAIN
+// =================================================================================
 
 int main(int argc, char* argv[]) {
     std::string inputFile;
     std::string outputFile;
-    int numTriangles = 10000000;  // Default: 10 million
+    int numTriangles = 10000000;  
     bool leavesOnly = false;
 
-    // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        
         if (arg == "-h" || arg == "--help") {
             printUsage(argv[0]);
             return 0;
         } else if (arg == "-i" || arg == "--input") {
-            if (i + 1 < argc) {
-                inputFile = argv[++i];
-            } else {
-                std::cerr << "Error: " << arg << " requires a file path\n";
-                return 1;
-            }
+            if (i + 1 < argc) inputFile = argv[++i];
         } else if (arg == "-o" || arg == "--output") {
-            if (i + 1 < argc) {
-                outputFile = argv[++i];
-            } else {
-                std::cerr << "Error: " << arg << " requires a file path\n";
-                return 1;
-            }
+            if (i + 1 < argc) outputFile = argv[++i];
         } else if (arg == "-n" || arg == "--triangles") {
-            if (i + 1 < argc) {
-                numTriangles = std::atoi(argv[++i]);
-                if (numTriangles <= 0) {
-                    std::cerr << "Error: Invalid triangle count\n";
-                    return 1;
-                }
-            } else {
-                std::cerr << "Error: " << arg << " requires a number\n";
-                return 1;
-            }
+            if (i + 1 < argc) numTriangles = std::atoi(argv[++i]);
         } else if (arg == "-l" || arg == "--leaves-only") {
             leavesOnly = true;
-        } else {
-            std::cerr << "Error: Unknown option: " << arg << "\n";
-            printUsage(argv[0]);
-            return 1;
         }
     }
 
-    // Load or generate mesh
     TriangleMesh mesh;
-    
     if (!inputFile.empty()) {
         std::cout << "Loading OBJ file: " << inputFile << std::endl;
         try {
             mesh = loadOBJ(inputFile);
-            std::cout << "Loaded " << mesh.size() << " triangles from OBJ file\n";
+            std::cout << "Loaded " << mesh.size() << " triangles\n";
         } catch (const std::exception& e) {
             std::cerr << "Error loading OBJ: " << e.what() << std::endl;
             return 1;
@@ -591,41 +545,46 @@ int main(int argc, char* argv[]) {
         mesh = generateRandomTriangles(numTriangles);
     }
 
-    if (mesh.size() == 0) {
-        std::cerr << "Error: No triangles to process\n";
-        return 1;
-    }
+    if (mesh.size() == 0) return 1;
 
-    // Build BVH
     LBVHBuilderCUDA builder;
     
+    // 1. Prepare Data (Allocation + Copy) - NOT TIMED
+    std::cout << "Uploading data to GPU and allocating memory..." << std::endl;
+    builder.prepareData(mesh);
+
+    // Optional: Warmup run to initialize CUDA context fully
+    // builder.runCompute(mesh.size());
+    // CUDA_CHECK(cudaDeviceSynchronize());
+
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
+    std::cout << "Starting optimized build..." << std::endl;
     cudaEventRecord(start);
-    builder.build(mesh);
-    cudaEventRecord(stop);
     
+    // 2. Run Compute - TIMED
+    builder.runCompute(mesh.size());
+    
+    cudaEventRecord(stop);
     cudaEventSynchronize(stop);
+    
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
-    std::cout << "Build Time: " << milliseconds << " ms" << std::endl;
+    std::cout << "------------------------------------------------" << std::endl;
+    std::cout << "Triangles: " << mesh.size() << std::endl;
+    std::cout << "Compute Time: " << milliseconds << " ms" << std::endl;
+    std::cout << "Throughput: " << (mesh.size() / 1000000.0f) / (milliseconds / 1000.0f) << " MTris/s" << std::endl;
+    std::cout << "------------------------------------------------" << std::endl;
+    
     builder.verify();
 
-    // Export BVH if output file specified
     if (!outputFile.empty()) {
         std::cout << "Exporting BVH to: " << outputFile << std::endl;
-        try {
-            std::vector<BVHNode> nodes = builder.getNodes();
-            exportBVHToOBJ(outputFile, nodes, leavesOnly);
-            std::cout << "Exported " << nodes.size() << " BVH nodes"
-                      << (leavesOnly ? " (leaves only)" : "") << std::endl;
-        } catch (const std::exception& e) {
-            std::cerr << "Error exporting BVH: " << e.what() << std::endl;
-            return 1;
-        }
+        std::vector<BVHNode> nodes = builder.getNodes();
+        exportBVHToOBJ(outputFile, nodes, leavesOnly);
     }
 
     cudaEventDestroy(start);
