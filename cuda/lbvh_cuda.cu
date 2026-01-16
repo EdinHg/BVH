@@ -454,17 +454,21 @@ public:
             BVHNode bvhNode;
             bvhNode.bounds.min = Vec3(node.bbox.min.x, node.bbox.min.y, node.bbox.min.z);
             bvhNode.bounds.max = Vec3(node.bbox.max.x, node.bbox.max.y, node.bbox.max.z);
+            bvhNode.axis = 0;
             
             if (node.leftChild & 0x80000000) {
+                // Leaf node
                 bvhNode.childCount = 0;  
+                bvhNode.childOffset = 0;
                 bvhNode.primOffset = node.leftChild & 0x7FFFFFFF;  
                 bvhNode.primCount = 1;
             } else {
+                // Internal node
                 bvhNode.childCount = 2;  
                 bvhNode.childOffset = node.leftChild;  
+                bvhNode.primOffset = node.rightChild;
                 bvhNode.primCount = 0;
             }
-            bvhNode.axis = 0;
             result.push_back(bvhNode);
         }
         return result;
