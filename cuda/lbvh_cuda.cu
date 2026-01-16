@@ -449,6 +449,9 @@ public:
         std::vector<BVHNode> result;
         result.reserve(hostNodes.size());
         
+        int numInternal = 0;
+        int numLeaves = 0;
+        
         for (size_t i = 0; i < hostNodes.size(); ++i) {
             const auto& node = hostNodes[i];
             BVHNode bvhNode;
@@ -462,15 +465,21 @@ public:
                 bvhNode.childOffset = 0;
                 bvhNode.primOffset = node.leftChild & 0x7FFFFFFF;  
                 bvhNode.primCount = 1;
+                numLeaves++;
             } else {
                 // Internal node
                 bvhNode.childCount = 2;  
                 bvhNode.childOffset = node.leftChild;  
                 bvhNode.primOffset = node.rightChild;
                 bvhNode.primCount = 0;
+                numInternal++;
             }
             result.push_back(bvhNode);
         }
+        
+        std::cout << "Total nodes: " << hostNodes.size() 
+                  << " (internal: " << numInternal << ", leaves: " << numLeaves << ")\n";
+        
         return result;
     }
 };
