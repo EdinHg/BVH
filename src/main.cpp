@@ -3,6 +3,8 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <cstdlib>
+#include <ctime>
 
 #include "mesh/obj_loader.hpp"
 #include "bvh/bvh_builder.hpp"
@@ -16,9 +18,32 @@
 #include "bvh/lbvh_cuda_builder.hpp"
 #endif
 
+TriangleMesh generateRandomTriangles(int n) {
+    TriangleMesh mesh;
+    mesh.reserve(n);
+    
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+    
+    for (int i = 0; i < n; ++i) {
+        float x = (std::rand() % 1000) / 10.0f;
+        float y = (std::rand() % 1000) / 10.0f;
+        float z = (std::rand() % 1000) / 10.0f;
+        
+        mesh.addTriangle(
+            Vec3(x, y, z),
+            Vec3(x + 1.0f, y, z),
+            Vec3(x, y + 1.0f, z)
+        );
+    }
+    
+    return mesh;
+}
+
 void printUsage(const char* program) {
     std::cerr << "Usage: " << program << " <model.obj> [options]\n";
+    std::cerr << "   or: " << program << " --random <count> [options]\n";
     std::cerr << "Options:\n";
+    std::cerr << "  --random <n>     Generate n random triangles instead of loading OBJ\n";
     std::cerr << "  --lbvh           Use CPU LBVH (Morton code) builder\n";
 #ifdef USE_CUDA
     std::cerr << "  --cuda           Use CUDA LBVH builder\n";
@@ -35,34 +60,49 @@ int main(int argc, char* argv[]) {
     }
 
     // Parse arguments
-    std::string modelPath = argv[1];
+    std::string modelPath;
     bool doExport = false;
     bool leavesOnly = false;
     bool useLBVH = false;
     bool useCUDA = false;
     bool compareMode = false;
+    int randomTriangles = 0;
 
-    for (int i = 2; i < argc; ++i) {
+    for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--export") doExport = true;
         else if (arg == "--export-leaves") { doExport = true; leavesOnly = true; }
         else if (arg == "--lbvh") useLBVH = true;
+        else if (arg == "--random" && i + 1 < argc) {
+            randomTriangles = std::atoi(argv[++i]);
+        }
 #ifdef USE_CUDA
         else if (arg == "--cuda") useCUDA = true;
         else if (arg == "--compare") compareMode = true;
 #endif
+        else if (arg[0] != '-' && modelPath.empty()) {
+            modelPath = arg;
+        }
     }
 
-    // Load mesh
+    // Load or generate mesh
     TriangleMesh mesh;
-    try {
-        mesh = loadOBJ(modelPath);
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+    if (randomTriangles > 0) {
+        std::cout << "Generating " << randomTriangles << " random triangles...\n";
+        mesh = generateRandomTriangles(randomTriangles);
+        std::cout << "Generated " << mesh.size() << " triangles\n\n";
+    } else if (!modelPath.empty()) {
+        try {
+            mesh = loadOBJ(modelPath);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+        std::cout << "Loaded " << mesh.size() << " triangles from " << modelPath << "\n\n";
+    } else {
+        printUsage(argv[0]);
         return 1;
     }
-
-    std::cout << "Loaded " << mesh.size() << " triangles from " << modelPath << "\n\n";
 
     if (mesh.size() == 0) {
         std::cerr << "Error: No triangles in mesh\n";
