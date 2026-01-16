@@ -19,8 +19,8 @@
 #include <thrust/reduce.h>
 #include <thrust/extrema.h>
 
-#include "../src/mesh/obj_loader.hpp"
-#include "../src/bvh/bvh_export.hpp"
+#include "obj_loader.hpp"
+#include "bvh_export.hpp"
 
 struct __align__(16) float3_cw {
     float x, y, z;
