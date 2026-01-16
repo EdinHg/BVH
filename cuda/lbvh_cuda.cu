@@ -19,6 +19,8 @@
 #include <thrust/reduce.h>
 #include <thrust/extrema.h>
 
+#include <cub/cub.cuh>
+
 #include "../src/mesh/obj_loader.hpp"
 #include "../src/bvh/bvh_export.hpp"
 
@@ -304,6 +306,10 @@ private:
     thrust::device_vector<uint32_t> d_mortonCodes;
     thrust::device_vector<uint32_t> d_indices;
     
+    thrust::device_vector<uint32_t> d_mortonCodes_alt; 
+    thrust::device_vector<uint32_t> d_indices_alt;     
+    thrust::device_vector<uint8_t>  d_cub_temp_storage; 
+    
     thrust::device_vector<LBVHNode> d_nodes;
     thrust::device_vector<int> d_atomicFlags;
 
@@ -330,6 +336,8 @@ public:
         d_indices.resize(n);
         d_nodes.resize(2 * n - 1);
         d_atomicFlags.resize(2 * n - 1);
+        d_mortonCodes_alt.resize(n);
+        d_indices_alt.resize(n);
         
         thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
 
@@ -357,7 +365,46 @@ public:
             thrust::raw_pointer_cast(d_indices.data()));
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        thrust::sort_by_key(d_mortonCodes.begin(), d_mortonCodes.end(), d_indices.begin());
+        // 1. Setup pointers for CUB
+        uint32_t* d_keys_in   = thrust::raw_pointer_cast(d_mortonCodes.data());
+        uint32_t* d_keys_out  = thrust::raw_pointer_cast(d_mortonCodes_alt.data());
+        uint32_t* d_values_in = thrust::raw_pointer_cast(d_indices.data());
+        uint32_t* d_values_out= thrust::raw_pointer_cast(d_indices_alt.data());
+
+        // 2. Determine temporary storage size needed
+        void* d_temp_storage = nullptr;
+        size_t temp_storage_bytes = 0;
+        
+        // First call just asks "How much memory do you need?"
+        cub::DeviceRadixSort::SortPairs(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_in, d_keys_out,
+            d_values_in, d_values_out,
+            n
+        );
+
+        // 3. Allocate that temp storage (using our cached vector)
+        if (d_cub_temp_storage.size() < temp_storage_bytes) {
+            d_cub_temp_storage.resize(temp_storage_bytes);
+        }
+        d_temp_storage = thrust::raw_pointer_cast(d_cub_temp_storage.data());
+
+        // 4. Run the actual sort
+        // Notice: bit_start=0, bit_end=30 (since Morton codes are 30 bits)
+        // Restricting the bit range makes it even faster!
+        cub::DeviceRadixSort::SortPairs(
+            d_temp_storage, temp_storage_bytes,
+            d_keys_in, d_keys_out,
+            d_values_in, d_values_out,
+            n, 0, 30 
+        );
+
+        // 5. Swap the vectors
+        // The sorted data is now in the "_alt" vectors.
+        // We swap them so d_mortonCodes and d_indices hold the valid sorted data
+        // for the rest of your pipeline.
+        d_mortonCodes.swap(d_mortonCodes_alt);
+        d_indices.swap(d_indices_alt);
 
         kBuildInternalNodes<<<gridSize, blockSize>>>(
             thrust::raw_pointer_cast(d_mortonCodes.data()),
