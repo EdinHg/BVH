@@ -2,8 +2,11 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <float.h>
 #include <iomanip>
+#include <string>
 
 // CUDA includes
 #include <cuda_runtime.h>
@@ -17,6 +20,10 @@
 #include <thrust/execution_policy.h>
 #include <thrust/reduce.h>
 #include <thrust/extrema.h>
+
+// Project includes for OBJ loading/exporting
+#include "../src/mesh/obj_loader.hpp"
+#include "../src/bvh/bvh_export.hpp"
 
 // --- Minimal Geometry Definitions for Standalone Compilation ---
 struct __align__(16) float3_cw {
@@ -42,20 +49,6 @@ struct LBVHNode {
     uint32_t leftChild;  // Leaf if (leftChild & 0x80000000)
     uint32_t rightChild;
     uint32_t parent;     // Needed for bottom-up traversal
-};
-
-// Host-side Triangle Structure of Arrays
-struct TrianglesSoA {
-    std::vector<float> v0x, v0y, v0z;
-    std::vector<float> v1x, v1y, v1z;
-    std::vector<float> v2x, v2y, v2z;
-
-    void resize(size_t n) {
-        v0x.resize(n); v0y.resize(n); v0z.resize(n);
-        v1x.resize(n); v1y.resize(n); v1z.resize(n);
-        v2x.resize(n); v2y.resize(n); v2z.resize(n);
-    }
-    size_t size() const { return v0x.size(); }
 };
 
 // Device-side pointers for Triangles (Passed to kernels)
@@ -327,6 +320,19 @@ __global__ void kRefitHierarchy(
     }
 }
 
+struct AABBReduce {
+    __host__ __device__ AABB_cw operator()(const AABB_cw& a, const AABB_cw& b) {
+        AABB_cw res;
+        res.min.x = fminf(a.min.x, b.min.x);
+        res.min.y = fminf(a.min.y, b.min.y);
+        res.min.z = fminf(a.min.z, b.min.z);
+        res.max.x = fmaxf(a.max.x, b.max.x);
+        res.max.y = fmaxf(a.max.y, b.max.y);
+        res.max.z = fmaxf(a.max.z, b.max.z);
+        return res;
+    }
+};
+
 // ------------------------------------------------------------------
 // Host Builder Class
 // ------------------------------------------------------------------
@@ -355,7 +361,7 @@ private:
     }
 
 public:
-    void build(const TrianglesSoA& tris) {
+    void build(const TriangleMesh& tris) {
         int n = tris.size();
         if (n == 0) return;
 
@@ -398,18 +404,6 @@ public:
         // This is a rough way to do it with thrust, usually you write a custom reduction kernel
         // For brevity/correctness in demo, we'll assume a kernel did it or copy back small data
         // Let's implement a quick GPU reduction via thrust
-        struct AABBReduce {
-            __host__ __device__ AABB_cw operator()(const AABB_cw& a, const AABB_cw& b) {
-                AABB_cw res;
-                res.min.x = fminf(a.min.x, b.min.x);
-                res.min.y = fminf(a.min.y, b.min.y);
-                res.min.z = fminf(a.min.z, b.min.z);
-                res.max.x = fmaxf(a.max.x, b.max.x);
-                res.max.y = fmaxf(a.max.y, b.max.y);
-                res.max.z = fmaxf(a.max.z, b.max.z);
-                return res;
-            }
-        };
 
         AABB_cw sceneBounds = thrust::reduce(d_triBBoxes.begin(), d_triBBoxes.end(), init, AABBReduce());
 
@@ -458,30 +452,140 @@ public:
                   << "[" << root.bbox.min.x << ", " << root.bbox.min.y << ", " << root.bbox.min.z << "] - "
                   << "[" << root.bbox.max.x << ", " << root.bbox.max.y << ", " << root.bbox.max.z << "]\n";
     }
+
+    // Get BVH nodes for export (converts to BVHNode format)
+    std::vector<BVHNode> getNodes() const {
+        std::vector<LBVHNode> hostNodes(d_nodes.begin(), d_nodes.end());
+        std::vector<BVHNode> result;
+        result.reserve(hostNodes.size());
+        
+        for (const auto& node : hostNodes) {
+            BVHNode bvhNode;
+            bvhNode.bounds.min = Vec3(node.bbox.min.x, node.bbox.min.y, node.bbox.min.z);
+            bvhNode.bounds.max = Vec3(node.bbox.max.x, node.bbox.max.y, node.bbox.max.z);
+            bvhNode.left = node.leftChild;
+            bvhNode.right = node.rightChild;
+            result.push_back(bvhNode);
+        }
+        return result;
+    }
 };
+
+// ------------------------------------------------------------------
+// Command-line argument parsing
+// ------------------------------------------------------------------
+
+void printUsage(const char* programName) {
+    std::cout << "Usage: " << programName << " [options]\n"
+              << "Options:\n"
+              << "  -i, --input <file.obj>    Input OBJ file to load\n"
+              << "  -o, --output <file.obj>   Output OBJ file for BVH export\n"
+              << "  -n, --triangles <count>   Number of random triangles (default: 10000000)\n"
+              << "  -l, --leaves-only         Export only leaf node bounding boxes\n"
+              << "  -h, --help                Show this help message\n"
+              << "\nExamples:\n"
+              << "  " << programName << " -i model.obj -o bvh.obj\n"
+              << "  " << programName << " -n 1000000 -o bvh.obj\n"
+              << "  " << programName << " -i model.obj -o bvh.obj -l\n";
+}
+
+// ------------------------------------------------------------------
+// Random triangle generation
+// ------------------------------------------------------------------
+
+TriangleMesh generateRandomTriangles(int n) {
+    TriangleMesh mesh;
+    mesh.reserve(n);
+    
+    for (int i = 0; i < n; ++i) {
+        float x = (rand() % 1000) / 10.0f;
+        float y = (rand() % 1000) / 10.0f;
+        float z = (rand() % 1000) / 10.0f;
+        
+        mesh.addTriangle(
+            Vec3(x, y, z),
+            Vec3(x + 1, y, z),
+            Vec3(x, y + 1, z)
+        );
+    }
+    
+    return mesh;
+}
 
 // ------------------------------------------------------------------
 // Main / Test
 // ------------------------------------------------------------------
 
-int main() {
-    int n = 1000000; // 1 Million triangles
-    std::cout << "Generating " << n << " random triangles..." << std::endl;
+int main(int argc, char* argv[]) {
+    std::string inputFile;
+    std::string outputFile;
+    int numTriangles = 10000000;  // Default: 10 million
+    bool leavesOnly = false;
 
-    TrianglesSoA tris;
-    tris.resize(n);
-
-    // Fill with random data
-    for(int i=0; i<n; ++i) {
-        float x = (rand() % 1000) / 10.0f;
-        float y = (rand() % 1000) / 10.0f;
-        float z = (rand() % 1000) / 10.0f;
+    // Parse command-line arguments
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
         
-        tris.v0x[i] = x; tris.v0y[i] = y; tris.v0z[i] = z;
-        tris.v1x[i] = x + 1; tris.v1y[i] = y; tris.v1z[i] = z;
-        tris.v2x[i] = x; tris.v2y[i] = y + 1; tris.v2z[i] = z;
+        if (arg == "-h" || arg == "--help") {
+            printUsage(argv[0]);
+            return 0;
+        } else if (arg == "-i" || arg == "--input") {
+            if (i + 1 < argc) {
+                inputFile = argv[++i];
+            } else {
+                std::cerr << "Error: " << arg << " requires a file path\n";
+                return 1;
+            }
+        } else if (arg == "-o" || arg == "--output") {
+            if (i + 1 < argc) {
+                outputFile = argv[++i];
+            } else {
+                std::cerr << "Error: " << arg << " requires a file path\n";
+                return 1;
+            }
+        } else if (arg == "-n" || arg == "--triangles") {
+            if (i + 1 < argc) {
+                numTriangles = std::atoi(argv[++i]);
+                if (numTriangles <= 0) {
+                    std::cerr << "Error: Invalid triangle count\n";
+                    return 1;
+                }
+            } else {
+                std::cerr << "Error: " << arg << " requires a number\n";
+                return 1;
+            }
+        } else if (arg == "-l" || arg == "--leaves-only") {
+            leavesOnly = true;
+        } else {
+            std::cerr << "Error: Unknown option: " << arg << "\n";
+            printUsage(argv[0]);
+            return 1;
+        }
     }
 
+    // Load or generate mesh
+    TriangleMesh mesh;
+    
+    if (!inputFile.empty()) {
+        std::cout << "Loading OBJ file: " << inputFile << std::endl;
+        try {
+            mesh = loadOBJ(inputFile);
+            std::cout << "Loaded " << mesh.size() << " triangles from OBJ file\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Error loading OBJ: " << e.what() << std::endl;
+            return 1;
+        }
+    } else {
+        std::cout << "Generating " << numTriangles << " random triangles..." << std::endl;
+        mesh = generateRandomTriangles(numTriangles);
+    }
+
+    if (mesh.size() == 0) {
+        std::cerr << "Error: No triangles to process\n";
+        return 1;
+    }
+
+    // Build BVH
     LBVHBuilderCUDA builder;
     
     cudaEvent_t start, stop;
@@ -489,15 +593,32 @@ int main() {
     cudaEventCreate(&stop);
 
     cudaEventRecord(start);
-    builder.build(tris);
+    builder.build(mesh);
     cudaEventRecord(stop);
     
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
-    std::cout << "Time: " << milliseconds << " ms" << std::endl;
+    std::cout << "Build Time: " << milliseconds << " ms" << std::endl;
     builder.verify();
+
+    // Export BVH if output file specified
+    if (!outputFile.empty()) {
+        std::cout << "Exporting BVH to: " << outputFile << std::endl;
+        try {
+            std::vector<BVHNode> nodes = builder.getNodes();
+            exportBVHToOBJ(outputFile, nodes, leavesOnly);
+            std::cout << "Exported " << nodes.size() << " BVH nodes"
+                      << (leavesOnly ? " (leaves only)" : "") << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Error exporting BVH: " << e.what() << std::endl;
+            return 1;
+        }
+    }
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     return 0;
 }
