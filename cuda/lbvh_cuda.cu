@@ -459,12 +459,23 @@ public:
         std::vector<BVHNode> result;
         result.reserve(hostNodes.size());
         
-        for (const auto& node : hostNodes) {
+        for (size_t i = 0; i < hostNodes.size(); ++i) {
+            const auto& node = hostNodes[i];
             BVHNode bvhNode;
             bvhNode.bounds.min = Vec3(node.bbox.min.x, node.bbox.min.y, node.bbox.min.z);
             bvhNode.bounds.max = Vec3(node.bbox.max.x, node.bbox.max.y, node.bbox.max.z);
-            bvhNode.left = node.leftChild;
-            bvhNode.right = node.rightChild;
+            
+            // Check if this is a leaf node (high bit set in leftChild)
+            if (node.leftChild & 0x80000000) {
+                bvhNode.childCount = 0;  // Leaf
+                bvhNode.primOffset = node.leftChild & 0x7FFFFFFF;  // Strip high bit
+                bvhNode.primCount = 1;
+            } else {
+                bvhNode.childCount = 2;  // Binary internal node
+                bvhNode.childOffset = node.leftChild;  // Left child index
+                bvhNode.primCount = 0;
+            }
+            bvhNode.axis = 0;
             result.push_back(bvhNode);
         }
         return result;
