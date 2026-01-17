@@ -310,6 +310,7 @@ public:
         d_v1x = mesh.v1x; d_v1y = mesh.v1y; d_v1z = mesh.v1z;
         d_v2x = mesh.v2x; d_v2y = mesh.v2y; d_v2z = mesh.v2z;
         
+        d_triBBoxes.resize(n);  
         d_centroids.resize(n);
         d_mortonCodes.resize(n);
         d_indices.resize(n);
