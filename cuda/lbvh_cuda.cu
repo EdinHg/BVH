@@ -27,45 +27,6 @@
 #include "../src/bvh/bvh_export.hpp"
 
 // =================================================================================
-// ZA COLAB EXPORT
-// =================================================================================
-
-struct PackedNode {
-    float min_x, min_y, min_z;
-    float max_x, max_y, max_z;
-    int32_t left;   // Raw child index (includes leaf bit flag)
-    int32_t right;  // Raw child index
-    int32_t parent;
-};
-
-void exportBVHToBinary(const std::string& filename, const std::vector<LBVHNode>& nodes) {
-    std::vector<PackedNode> packed(nodes.size());
-
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        packed[i].min_x = nodes[i].bbox.min.x;
-        packed[i].min_y = nodes[i].bbox.min.y;
-        packed[i].min_z = nodes[i].bbox.min.z;
-        
-        packed[i].max_x = nodes[i].bbox.max.x;
-        packed[i].max_y = nodes[i].bbox.max.y;
-        packed[i].max_z = nodes[i].bbox.max.z;
-
-        packed[i].left = (int32_t)nodes[i].leftChild;
-        packed[i].right = (int32_t)nodes[i].rightChild;
-        packed[i].parent = (int32_t)nodes[i].parent;
-    }
-
-    std::ofstream outfile(filename, std::ios::out | std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Failed to open output file: " << filename << std::endl;
-        return;
-    }
-    outfile.write(reinterpret_cast<const char*>(packed.data()), packed.size() * sizeof(PackedNode));
-    outfile.close();
-    std::cout << "Exported " << packed.size() << " nodes to binary file: " << filename << std::endl;
-}
-
-// =================================================================================
 // DATA STRUCTURES
 // =================================================================================
 
@@ -109,6 +70,46 @@ struct TrianglesSoADevice {
             exit(EXIT_FAILURE); \
         } \
     } while (0)
+
+// =================================================================================
+// ZA COLAB EXPORT
+// =================================================================================
+
+struct PackedNode {
+    float min_x, min_y, min_z;
+    float max_x, max_y, max_z;
+    int32_t left;   // Raw child index (includes leaf bit flag)
+    int32_t right;  // Raw child index
+    int32_t parent;
+};
+
+void exportBVHToBinary(const std::string& filename, const std::vector<LBVHNode>& nodes) {
+    std::vector<PackedNode> packed(nodes.size());
+
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        packed[i].min_x = nodes[i].bbox.min.x;
+        packed[i].min_y = nodes[i].bbox.min.y;
+        packed[i].min_z = nodes[i].bbox.min.z;
+        
+        packed[i].max_x = nodes[i].bbox.max.x;
+        packed[i].max_y = nodes[i].bbox.max.y;
+        packed[i].max_z = nodes[i].bbox.max.z;
+
+        packed[i].left = (int32_t)nodes[i].leftChild;
+        packed[i].right = (int32_t)nodes[i].rightChild;
+        packed[i].parent = (int32_t)nodes[i].parent;
+    }
+
+    std::ofstream outfile(filename, std::ios::out | std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Failed to open output file: " << filename << std::endl;
+        return;
+    }
+    outfile.write(reinterpret_cast<const char*>(packed.data()), packed.size() * sizeof(PackedNode));
+    outfile.close();
+    std::cout << "Exported " << packed.size() << " nodes to binary file: " << filename << std::endl;
+}
+
 
 // =================================================================================
 // DEVICE HELPER FUNCTIONS
