@@ -603,6 +603,17 @@ public:
                   << "[" << root.bbox.max.x << ", " << root.bbox.max.y << ", " << root.bbox.max.z << "]\n";
     }
 
+    // Get raw LBVH nodes for export
+    std::vector<LBVHNode> getRawNodes() const {
+        if (!d_nodes) return std::vector<LBVHNode>();
+
+        int totalNodes = 2 * numTriangles - 1;
+        std::vector<LBVHNode> hostNodes(totalNodes);
+        CUDA_CHECK(cudaMemcpy(hostNodes.data(), d_nodes, totalNodes * sizeof(LBVHNode), cudaMemcpyDeviceToHost));
+
+        return hostNodes;
+    }
+
     // Get BVH nodes for export (converts to BVHNode format)
     std::vector<BVHNode> getNodes() const {
         if (!d_nodes) return std::vector<BVHNode>();
@@ -668,7 +679,7 @@ struct VizNode {
     int rightIdx;
 };
 
-void exportBVHToBinary(const std::string& filename, const std::vector<BVHNode>& nodes) {
+void exportBVHToBinaryLBVH(const std::string& filename, const std::vector<LBVHNode>& nodes) {
     std::ofstream file(filename, std::ios::binary);
 
     std::vector<VizNode> exportNodes;
@@ -696,10 +707,10 @@ void exportBVHToBinary(const std::string& filename, const std::vector<BVHNode>& 
 }
 
 // ------------------------------------------------------------------
-// OBJ Export for Visualization
+// OBJ Export for Visualization (LBVH version)
 // ------------------------------------------------------------------
 
-void exportBVHToOBJ(const std::string& filename, const std::vector<BVHNode>& nodes, bool leavesOnly) {
+void exportLBVHToOBJ(const std::string& filename, const std::vector<LBVHNode>& nodes, bool leavesOnly) {
     std::ofstream file(filename);
     int v_offset = 1;
 
@@ -868,8 +879,8 @@ int main(int argc, char* argv[]) {
         if (colabExport) {
             std::cout << "Exporting BVH to Colab binary format: " << outputFile << std::endl;
             try {
-                std::vector<BVHNode> nodes = builder.getNodes();
-                exportBVHToBinary(outputFile, nodes);
+                std::vector<LBVHNode> nodes = builder.getRawNodes();
+                exportBVHToBinaryLBVH(outputFile, nodes);
             } catch (const std::exception& e) {
                 std::cerr << "Error exporting BVH: " << e.what() << std::endl;
                 return 1;
@@ -877,8 +888,8 @@ int main(int argc, char* argv[]) {
         } else {
             std::cout << "Exporting BVH to OBJ format: " << outputFile << std::endl;
             try {
-                std::vector<BVHNode> nodes = builder.getNodes();
-                exportBVHToOBJ(outputFile, nodes, leavesOnly);
+                std::vector<LBVHNode> nodes = builder.getRawNodes();
+                exportLBVHToOBJ(outputFile, nodes, leavesOnly);
                 std::cout << "Exported " << nodes.size() << " BVH nodes"
                           << (leavesOnly ? " (leaves only)" : "") << std::endl;
             } catch (const std::exception& e) {
