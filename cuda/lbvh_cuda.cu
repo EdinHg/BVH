@@ -1,3 +1,5 @@
+%%writefile lbvh_cuda.cu
+
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -7,28 +9,20 @@
 #include <float.h>
 #include <iomanip>
 #include <string>
+#include <fstream>
+#include <sstream>
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
-// Thrust headers
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
 #include <thrust/pair.h>
 #include <thrust/execution_policy.h>
 #include <thrust/reduce.h>
-#include <thrust/extrema.h>
 
-// CUB headers for optimized sorting
-#include <cub/cub.cuh>
-
-#include "../src/mesh/obj_loader.hpp"
-#include "../src/bvh/bvh_export.hpp"
-
-// =================================================================================
-// DATA STRUCTURES
-// =================================================================================
+// --- GEOMETRY & STRUCTS ---
 
 struct __align__(16) float3_cw {
     float x, y, z;
@@ -55,6 +49,22 @@ struct LBVHNode {
     uint32_t parent;     
 };
 
+using BVHNode = LBVHNode;
+
+struct TriangleMesh {
+    std::vector<float> v0x, v0y, v0z;
+    std::vector<float> v1x, v1y, v1z;
+    std::vector<float> v2x, v2y, v2z;
+
+    size_t size() const { return v0x.size(); }
+    
+    void resize(size_t n) {
+        v0x.resize(n); v0y.resize(n); v0z.resize(n);
+        v1x.resize(n); v1y.resize(n); v1z.resize(n);
+        v2x.resize(n); v2y.resize(n); v2z.resize(n);
+    }
+};
+
 struct TrianglesSoADevice {
     float *v0x, *v0y, *v0z;
     float *v1x, *v1y, *v1z;
@@ -71,49 +81,7 @@ struct TrianglesSoADevice {
         } \
     } while (0)
 
-// =================================================================================
-// ZA COLAB EXPORT
-// =================================================================================
-
-struct PackedNode {
-    float min_x, min_y, min_z;
-    float max_x, max_y, max_z;
-    int32_t left;   // Raw child index (includes leaf bit flag)
-    int32_t right;  // Raw child index
-    int32_t parent;
-};
-
-void exportBVHToBinary(const std::string& filename, const std::vector<LBVHNode>& nodes) {
-    std::vector<PackedNode> packed(nodes.size());
-
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        packed[i].min_x = nodes[i].bbox.min.x;
-        packed[i].min_y = nodes[i].bbox.min.y;
-        packed[i].min_z = nodes[i].bbox.min.z;
-        
-        packed[i].max_x = nodes[i].bbox.max.x;
-        packed[i].max_y = nodes[i].bbox.max.y;
-        packed[i].max_z = nodes[i].bbox.max.z;
-
-        packed[i].left = (int32_t)nodes[i].leftChild;
-        packed[i].right = (int32_t)nodes[i].rightChild;
-        packed[i].parent = (int32_t)nodes[i].parent;
-    }
-
-    std::ofstream outfile(filename, std::ios::out | std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Failed to open output file: " << filename << std::endl;
-        return;
-    }
-    outfile.write(reinterpret_cast<const char*>(packed.data()), packed.size() * sizeof(PackedNode));
-    outfile.close();
-    std::cout << "Exported " << packed.size() << " nodes to binary file: " << filename << std::endl;
-}
-
-
-// =================================================================================
-// DEVICE HELPER FUNCTIONS
-// =================================================================================
+// --- DEVICE FUNCTIONS ---
 
 __device__ __forceinline__ uint32_t expandBits(uint32_t v) {
     v = (v * 0x00010001u) & 0xFF0000FFu;
@@ -127,9 +95,11 @@ __device__ __forceinline__ uint32_t morton3D(float x, float y, float z) {
     x = fminf(fmaxf(x * 1024.0f, 0.0f), 1023.0f);
     y = fminf(fmaxf(y * 1024.0f, 0.0f), 1023.0f);
     z = fminf(fmaxf(z * 1024.0f, 0.0f), 1023.0f);
+    
     uint32_t xx = expandBits((uint32_t)x);
     uint32_t yy = expandBits((uint32_t)y);
     uint32_t zz = expandBits((uint32_t)z);
+    
     return xx * 4 + yy * 2 + zz;
 }
 
@@ -137,40 +107,26 @@ __device__ __forceinline__ int clz_custom(uint32_t x) {
     return x == 0 ? 32 : __clz(x);
 }
 
-// OPTIMIZED DELTA: Reads selfCode/selfIdx from registers, only 'j' from global memory
-__device__ int delta_cached(
-    uint32_t selfCode, 
-    uint32_t selfIdx, 
-    const uint32_t* sortedMortonCodes, 
-    const uint32_t* sortedIndices, 
-    int numObjects, 
-    int i, 
-    int j) 
-{
+__device__ int delta(const uint32_t* sortedMortonCodes, const uint32_t* sortedIndices, int numObjects, int i, int j) {
     if (j < 0 || j >= numObjects) return -1;
-    
-    // We only incur one global memory read here
+
+    uint32_t codeI = sortedMortonCodes[i];
     uint32_t codeJ = sortedMortonCodes[j];
-    
-    if (selfCode == codeJ) {
+
+    if (codeI == codeJ) {
+        uint32_t idxI = sortedIndices[i];
         uint32_t idxJ = sortedIndices[j];
-        return 32 + clz_custom(selfIdx ^ idxJ);
+        return 32 + clz_custom(idxI ^ idxJ);
     }
-    return clz_custom(selfCode ^ codeJ);
+
+    return clz_custom(codeI ^ codeJ);
 }
 
-// =================================================================================
-// KERNELS
-// =================================================================================
+// --- KERNELS ---
 
-__global__ void kComputeBoundsAndCentroids(
-    TrianglesSoADevice tris, 
-    int n, 
-    AABB_cw* triBBoxes, 
-    float3_cw* centroids, 
-    AABB_cw* globalBoundsBlock) 
-{
+__global__ void kComputeBoundsAndCentroids(TrianglesSoADevice tris, int n, AABB_cw* triBBoxes, float3_cw* centroids) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+
     if (i >= n) return;
 
     float3_cw v0(tris.v0x[i], tris.v0y[i], tris.v0z[i]);
@@ -178,34 +134,24 @@ __global__ void kComputeBoundsAndCentroids(
     float3_cw v2(tris.v2x[i], tris.v2y[i], tris.v2z[i]);
 
     float3_cw minVal, maxVal;
-    minVal.x = fminf(v0.x, fminf(v1.x, v2.x));
-    minVal.y = fminf(v0.y, fminf(v1.y, v2.y));
-    minVal.z = fminf(v0.z, fminf(v1.z, v2.z));
-    maxVal.x = fmaxf(v0.x, fmaxf(v1.x, v2.x));
-    maxVal.y = fmaxf(v0.y, fmaxf(v1.y, v2.y));
-    maxVal.z = fmaxf(v0.z, fmaxf(v1.z, v2.z));
 
-    triBBoxes[i].min = minVal;
-    triBBoxes[i].max = maxVal;
+    minVal.x = fminf(v0.x, fminf(v1.x, v2.x)); minVal.y = fminf(v0.y, fminf(v1.y, v2.y)); minVal.z = fminf(v0.z, fminf(v1.z, v2.z));
+    maxVal.x = fmaxf(v0.x, fmaxf(v1.x, v2.x)); maxVal.y = fmaxf(v0.y, fmaxf(v1.y, v2.y)); maxVal.z = fmaxf(v0.z, fmaxf(v1.z, v2.z));
+
+    triBBoxes[i].min = minVal; triBBoxes[i].max = maxVal;
 
     centroids[i] = (minVal + maxVal) * 0.5f;
 }
 
-__global__ void kComputeMortonCodes(
-    const float3_cw* centroids, 
-    int n, 
-    AABB_cw sceneBounds, 
-    uint32_t* mortonCodes, 
-    uint32_t* indices) 
-{
+__global__ void kComputeMortonCodes(const float3_cw* centroids, int n, AABB_cw sceneBounds, uint32_t* mortonCodes, uint32_t* indices) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+
     if (i >= n) return;
 
     float3_cw c = centroids[i];
     float3_cw minB = sceneBounds.min;
     float3_cw extents = sceneBounds.max - sceneBounds.min;
 
-    // Normalize centroid to [0,1]
     float x = (c.x - minB.x) / extents.x;
     float y = (c.y - minB.y) / extents.y;
     float z = (c.z - minB.z) / extents.z;
@@ -214,120 +160,79 @@ __global__ void kComputeMortonCodes(
     indices[i] = i;
 }
 
-__global__ void kBuildInternalNodes(
-    const uint32_t* sortedMortonCodes,
-    const uint32_t* sortedIndices,
-    LBVHNode* nodes,
-    int numObjects)
-{
+__global__ void kBuildInternalNodes(const uint32_t* sortedMortonCodes, const uint32_t* sortedIndices, LBVHNode* nodes, int numObjects) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numObjects - 1) return; 
 
-    // REGISTER CACHING OPTIMIZATION
-    uint32_t selfCode = sortedMortonCodes[i];
-    uint32_t selfIdx = sortedIndices[i];
+    if (i >= numObjects - 1) return;
 
-    int d = (delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i + 1) - 
-             delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i - 1)) >= 0 ? 1 : -1;
+    int d = 
+        (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + 1) - 
+         delta(sortedMortonCodes, sortedIndices, numObjects, i, i - 1)) >= 0 ? 1 : -1;
 
-    int min_delta = delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i - d);
+    int min_delta = delta(sortedMortonCodes, sortedIndices, numObjects, i, i - d);
     int l_max = 2;
-    while (delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i + l_max * d) > min_delta) {
-        l_max *= 2;
-    }
+
+    while (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + l_max * d) > min_delta) l_max *= 2;
 
     int l = 0;
+
     for (int t = l_max / 2; t >= 1; t /= 2) {
-        if (delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, i + (l + t) * d) > min_delta) {
-            l += t;
-        }
+        if (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + (l + t) * d) > min_delta) l += t;
     }
+
     int j = i + l * d;
+    int delta_node = delta(sortedMortonCodes, sortedIndices, numObjects, i, j);
 
-    int delta_node = delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, i, j);
     int s = 0;
-    
-    int first, last;
-    if (d > 0) { first = i; last = j; }
-    else       { first = j; last = i; }
 
+    int first = (d > 0) ? i : j;
+    int last = (d > 0) ? j : i;
     int len = last - first;
     int t = len;
-    
+
     do {
         t = (t + 1) >> 1;
-        if (delta_cached(selfCode, selfIdx, sortedMortonCodes, sortedIndices, numObjects, first, first + s + t) > delta_node) {
-            s += t;
-        }
+        if (delta(sortedMortonCodes, sortedIndices, numObjects, first, first + s + t) > delta_node) s += t;
     } while (t > 1);
-    
+
     int split = first + s;
 
-    uint32_t leftIdx, rightIdx;
-    
-    if (split == first) leftIdx = (numObjects - 1) + split; 
-    else                leftIdx = split;                    
-
-    if (split + 1 == last) rightIdx = (numObjects - 1) + split + 1; 
-    else                   rightIdx = split + 1;                    
+    uint32_t leftIdx = (split == first) ? (numObjects - 1) + split : split;
+    uint32_t rightIdx = (split + 1 == last) ? (numObjects - 1) + split + 1 : split + 1;
 
     nodes[i].leftChild = leftIdx;
     nodes[i].rightChild = rightIdx;
-    
     nodes[leftIdx].parent = i;
     nodes[rightIdx].parent = i;
 }
 
-__global__ void kInitLeafNodes(
-    LBVHNode* nodes, 
-    const AABB_cw* triBBoxes, 
-    const uint32_t* sortedIndices, 
-    int numObjects) 
-{
+__global__ void kInitLeafNodes(LBVHNode* nodes, const AABB_cw* triBBoxes, const uint32_t* sortedIndices, int numObjects) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+
     if (i >= numObjects) return;
 
-    int leafIdx = (numObjects - 1) + i; 
+    int leafIdx = (numObjects - 1) + i;
     uint32_t originalIndex = sortedIndices[i];
 
     nodes[leafIdx].bbox = triBBoxes[originalIndex];
-    nodes[leafIdx].leftChild = originalIndex | 0x80000000; 
+    nodes[leafIdx].leftChild = originalIndex | 0x80000000;
     nodes[leafIdx].rightChild = 0xFFFFFFFF;
 }
 
-__global__ void kRefitHierarchy(
-    LBVHNode* nodes, 
-    int* atomicCounters, 
-    int numObjects) 
-{
+__global__ void kRefitHierarchy(LBVHNode* nodes, int* atomicCounters, int numObjects) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+
     if (i >= numObjects) return;
 
-    // Start at the leaf node corresponding to this thread
     uint32_t idx = (numObjects - 1) + i;
-    
-    // Move up the tree
-    while (idx != 0) { 
+
+    while (idx != 0) {
         uint32_t parent = nodes[idx].parent;
-        
-        // =========================================================
-        // FIX 1: Memory Barrier
-        // Ensure that the write to nodes[idx].bbox is globally visible 
-        // BEFORE we increment the counter.
-        // =========================================================
-        __threadfence(); 
 
-        // atomicAdd returns the OLD value.
-        // If oldVal == 0, we are the first child to arrive -> We wait/die.
-        // If oldVal == 1, we are the second child -> We process the parent.
         int oldVal = atomicAdd(&atomicCounters[parent], 1);
-        
-        if (oldVal == 0) {
-           return; // First thread exits
-        }
 
-        // --- If we are here, we are the second thread ---
-        
+        if (oldVal == 0) return;
+
         uint32_t left = nodes[parent].leftChild;
         uint32_t right = nodes[parent].rightChild;
 
@@ -338,14 +243,11 @@ __global__ void kRefitHierarchy(
         unionBox.min.x = fminf(leftBox.min.x, rightBox.min.x);
         unionBox.min.y = fminf(leftBox.min.y, rightBox.min.y);
         unionBox.min.z = fminf(leftBox.min.z, rightBox.min.z);
-        
         unionBox.max.x = fmaxf(leftBox.max.x, rightBox.max.x);
         unionBox.max.y = fmaxf(leftBox.max.y, rightBox.max.y);
         unionBox.max.z = fmaxf(leftBox.max.z, rightBox.max.z);
-
+     
         nodes[parent].bbox = unionBox;
-
-        // Move up to process the next level
         idx = parent;
     }
 }
@@ -353,40 +255,29 @@ __global__ void kRefitHierarchy(
 struct AABBReduce {
     __host__ __device__ AABB_cw operator()(const AABB_cw& a, const AABB_cw& b) {
         AABB_cw res;
-        res.min.x = fminf(a.min.x, b.min.x);
-        res.min.y = fminf(a.min.y, b.min.y);
-        res.min.z = fminf(a.min.z, b.min.z);
-        res.max.x = fmaxf(a.max.x, b.max.x);
-        res.max.y = fmaxf(a.max.y, b.max.y);
-        res.max.z = fmaxf(a.max.z, b.max.z);
+        res.min.x = fminf(a.min.x, b.min.x); res.min.y = fminf(a.min.y, b.min.y); res.min.z = fminf(a.min.z, b.min.z);
+        res.max.x = fmaxf(a.max.x, b.max.x); res.max.y = fmaxf(a.max.y, b.max.y); res.max.z = fmaxf(a.max.z, b.max.z);
         return res;
     }
 };
 
-// =================================================================================
-// BUILDER CLASS
-// =================================================================================
+// --- BUILDER CLASS ---
 
 class LBVHBuilderCUDA {
 private:
+    // Device Vectors
     thrust::device_vector<float> d_v0x, d_v0y, d_v0z;
     thrust::device_vector<float> d_v1x, d_v1y, d_v1z;
     thrust::device_vector<float> d_v2x, d_v2y, d_v2z;
-    
     thrust::device_vector<AABB_cw> d_triBBoxes;
     thrust::device_vector<float3_cw> d_centroids;
-    
-    // Primary buffers for sort
     thrust::device_vector<uint32_t> d_mortonCodes;
     thrust::device_vector<uint32_t> d_indices;
-    
-    // CUB specific: Secondary buffers for ping-pong sort
-    thrust::device_vector<uint32_t> d_mortonCodes_alt;
-    thrust::device_vector<uint32_t> d_indices_alt;
-    thrust::device_vector<uint8_t>  d_cub_temp_storage;
-
     thrust::device_vector<LBVHNode> d_nodes;
     thrust::device_vector<int> d_atomicFlags;
+
+    // Profiling Events
+    cudaEvent_t start, e_centroids, e_morton, e_sort, e_topology, stop;
 
     TrianglesSoADevice getDevicePtrs() {
         return {
@@ -397,209 +288,267 @@ private:
     }
 
 public:
-    // PHASE 1: Data Upload (Not part of compute benchmark)
-    void prepareData(const TriangleMesh& tris) {
-        int n = tris.size();
-        if (n == 0) return;
+    LBVHBuilderCUDA() {
+        cudaEventCreate(&start);
+        cudaEventCreate(&e_centroids);
+        cudaEventCreate(&e_morton);
+        cudaEventCreate(&e_sort);
+        cudaEventCreate(&e_topology);
+        cudaEventCreate(&stop);
+    }
 
-        // Copy data to GPU (Heavy PCIe transfer)
-        d_v0x = tris.v0x; d_v0y = tris.v0y; d_v0z = tris.v0z;
-        d_v1x = tris.v1x; d_v1y = tris.v1y; d_v1z = tris.v1z;
-        d_v2x = tris.v2x; d_v2y = tris.v2y; d_v2z = tris.v2z;
+    ~LBVHBuilderCUDA() {
+        cudaEventDestroy(start);
+        cudaEventDestroy(e_centroids);
+        cudaEventDestroy(e_morton);
+        cudaEventDestroy(e_sort);
+        cudaEventDestroy(e_topology);
+        cudaEventDestroy(stop);
+    }
 
-        // Allocate buffers (Heavy OS operation)
-        d_triBBoxes.resize(n);
+    void prepareData(const TriangleMesh& mesh) {
+        int n = mesh.size();
+        d_v0x = mesh.v0x; d_v0y = mesh.v0y; d_v0z = mesh.v0z;
+        d_v1x = mesh.v1x; d_v1y = mesh.v1y; d_v1z = mesh.v1z;
+        d_v2x = mesh.v2x; d_v2y = mesh.v2y; d_v2z = mesh.v2z;
+        
         d_centroids.resize(n);
         d_mortonCodes.resize(n);
         d_indices.resize(n);
-        d_mortonCodes_alt.resize(n);
-        d_indices_alt.resize(n);
         d_nodes.resize(2 * n - 1);
         d_atomicFlags.resize(2 * n - 1);
-        
-        // LBVHNode initNode;
-        // initNode.parent = 0xFFFFFFFF;
-        // initNode.leftChild = 0;
-        // initNode.rightChild = 0;
-        // thrust::fill(d_nodes.begin(), d_nodes.end(), initNode);
-        thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
     }
 
-    // PHASE 2: Pure Compute (Benchmarked)
     void runCompute(int n) {
         if (n == 0) return;
-        
+
         thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
 
         int blockSize = 256;
         int gridSize = (n + blockSize - 1) / blockSize;
 
-        // 1. Compute Bounds
-        kComputeBoundsAndCentroids<<<gridSize, blockSize>>>(getDevicePtrs(), n, 
-            thrust::raw_pointer_cast(d_triBBoxes.data()), 
-            thrust::raw_pointer_cast(d_centroids.data()), 
-            nullptr);
+        cudaEventRecord(start);
 
-        // 2. Reduce Bounds
+        // 1. Centroids
+        kComputeBoundsAndCentroids<<<gridSize, blockSize>>>(getDevicePtrs(), n,
+            thrust::raw_pointer_cast(d_triBBoxes.data()),
+            thrust::raw_pointer_cast(d_centroids.data()));
+        
         AABB_cw init; 
-        init.min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
-        init.max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
         AABB_cw sceneBounds = thrust::reduce(d_triBBoxes.begin(), d_triBBoxes.end(), init, AABBReduce());
+        
+        cudaEventRecord(e_centroids);
 
-        float3_cw extents = sceneBounds.max - sceneBounds.min;
-        if(extents.x < 1e-6f) sceneBounds.max.x += 1e-6f;
-        if(extents.y < 1e-6f) sceneBounds.max.y += 1e-6f;
-        if(extents.z < 1e-6f) sceneBounds.max.z += 1e-6f;
-
-        // 3. Morton Codes
+        // 2. Morton Codes
         kComputeMortonCodes<<<gridSize, blockSize>>>(
-            thrust::raw_pointer_cast(d_centroids.data()), 
-            n, sceneBounds, 
-            thrust::raw_pointer_cast(d_mortonCodes.data()), 
+            thrust::raw_pointer_cast(d_centroids.data()),
+            n, sceneBounds,
+            thrust::raw_pointer_cast(d_mortonCodes.data()),
             thrust::raw_pointer_cast(d_indices.data()));
+            
+        cudaEventRecord(e_morton);
 
-        // 4. CUB Radix Sort
-        void* d_temp_storage = nullptr;
-        size_t temp_storage_bytes = 0;
+        // 3. Sort
+        thrust::sort_by_key(d_mortonCodes.begin(), d_mortonCodes.end(), d_indices.begin());
         
-        uint32_t* d_keys_in = thrust::raw_pointer_cast(d_mortonCodes.data());
-        uint32_t* d_keys_out = thrust::raw_pointer_cast(d_mortonCodes_alt.data());
-        uint32_t* d_values_in = thrust::raw_pointer_cast(d_indices.data());
-        uint32_t* d_values_out = thrust::raw_pointer_cast(d_indices_alt.data());
+        cudaEventRecord(e_sort);
 
-        // Determine size
-        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys_in, d_keys_out, d_values_in, d_values_out, n, 0, 30);
-        
-        if(d_cub_temp_storage.size() < temp_storage_bytes) {
-            d_cub_temp_storage.resize(temp_storage_bytes);
-        }
-        d_temp_storage = thrust::raw_pointer_cast(d_cub_temp_storage.data());
-
-        // Run Sort
-        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys_in, d_keys_out, d_values_in, d_values_out, n, 0, 30);
-        
-        // Swap pointers/vectors so d_mortonCodes holds the sorted result
-        d_mortonCodes.swap(d_mortonCodes_alt);
-        d_indices.swap(d_indices_alt);
-
-        // 5. Build Hierarchy
+        // 4. Topology
         kBuildInternalNodes<<<gridSize, blockSize>>>(
             thrust::raw_pointer_cast(d_mortonCodes.data()),
             thrust::raw_pointer_cast(d_indices.data()),
             thrust::raw_pointer_cast(d_nodes.data()),
             n);
 
-        // 6. Init Leaves
         kInitLeafNodes<<<gridSize, blockSize>>>(
             thrust::raw_pointer_cast(d_nodes.data()),
             thrust::raw_pointer_cast(d_triBBoxes.data()),
             thrust::raw_pointer_cast(d_indices.data()),
             n);
+            
+        cudaEventRecord(e_topology);
 
-        // 7. Refit
+        // 5. Refit
         kRefitHierarchy<<<gridSize, blockSize>>>(
             thrust::raw_pointer_cast(d_nodes.data()),
             thrust::raw_pointer_cast(d_atomicFlags.data()),
             n);
+            
+        cudaEventRecord(stop);
+        
+        // Print Breakdown
+        cudaEventSynchronize(stop);
+        float t_c, t_m, t_s, t_t, t_r;
+        cudaEventElapsedTime(&t_c, start, e_centroids);
+        cudaEventElapsedTime(&t_m, e_centroids, e_morton);
+        cudaEventElapsedTime(&t_s, e_morton, e_sort);
+        cudaEventElapsedTime(&t_t, e_sort, e_topology);
+        cudaEventElapsedTime(&t_r, e_topology, stop);
+        float total = t_c + t_m + t_s + t_t + t_r;
 
-        cudaError_t err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            std::cerr << "CUDA Fatal Error: " << cudaGetErrorString(err) << std::endl;
-            throw std::runtime_error("GPU Kernel Failed");
-        }
+        std::cout << "\n   [GPU Phase Breakdown]\n";
+        std::cout << "   Bounds/Centroids: " << std::setw(6) << t_c << " ms\n";
+        std::cout << "   Morton Codes:     " << std::setw(6) << t_m << " ms\n";
+        std::cout << "   Radix Sort:       " << std::setw(6) << t_s << " ms\n";
+        std::cout << "   Topology Build:   " << std::setw(6) << t_t << " ms\n";
+        std::cout << "   Bottom-Up Refit:  " << std::setw(6) << t_r << " ms\n";
+        std::cout << "   Total Kernel Time:" << std::setw(6) << total << " ms\n\n";
     }
 
     void verify() {
         if(d_nodes.empty()) return;
-        LBVHNode root = d_nodes[0];
-        std::cout << "Root Bounds: " 
-                  << "[" << root.bbox.min.x << ", " << root.bbox.min.y << ", " << root.bbox.min.z << "] - "
-                  << "[" << root.bbox.max.x << ", " << root.bbox.max.y << ", " << root.bbox.max.z << "]\n";
+        LBVHNode hostRoot = d_nodes[0]; 
+        AABB_cw root = hostRoot.bbox;
+        std::cout << "Verification Root Bounds:\n";
+        std::cout << "  Min: " << root.min.x << ", " << root.min.y << ", " << root.min.z << "\n";
+        std::cout << "  Max: " << root.max.x << ", " << root.max.y << ", " << root.max.z << "\n";
     }
 
-    std::vector<LBVHNode> getRawNodes() const {
-        if (d_nodes.empty()) return {};
-        thrust::host_vector<LBVHNode> h_nodes = d_nodes;
-        return std::vector<LBVHNode>(h_nodes.begin(), h_nodes.end());
+    std::vector<LBVHNode> getRawNodes() {
+        std::vector<LBVHNode> h_nodes(d_nodes.size());
+        thrust::copy(d_nodes.begin(), d_nodes.end(), h_nodes.begin());
+        return h_nodes;
     }
 
-    std::vector<BVHNode> getNodes() const {
-        std::vector<LBVHNode> hostNodes(d_nodes.begin(), d_nodes.end());
-        std::vector<BVHNode> result;
-        result.reserve(hostNodes.size());
-        
-        int numInternal = 0;
-        int numLeaves = 0;
-        
-        for (size_t i = 0; i < hostNodes.size(); ++i) {
-            const auto& node = hostNodes[i];
-            BVHNode bvhNode;
-            bvhNode.bounds.min = Vec3(node.bbox.min.x, node.bbox.min.y, node.bbox.min.z);
-            bvhNode.bounds.max = Vec3(node.bbox.max.x, node.bbox.max.y, node.bbox.max.z);
-            bvhNode.axis = 0;
-            
-            if (node.leftChild & 0x80000000) {
-                // Leaf node
-                bvhNode.childCount = 0;  
-                bvhNode.childOffset = 0;
-                bvhNode.primOffset = node.leftChild & 0x7FFFFFFF;  
-                bvhNode.primCount = 1;
-                numLeaves++;
-            } else {
-                // Internal node
-                bvhNode.childCount = 2;  
-                bvhNode.childOffset = node.leftChild;  
-                bvhNode.primOffset = node.rightChild;
-                bvhNode.primCount = 0;
-                numInternal++;
-            }
-            result.push_back(bvhNode);
-        }
-        
-        std::cout << "Total nodes: " << hostNodes.size() 
-                  << " (internal: " << numInternal << ", leaves: " << numLeaves << ")\n";
-        
-        return result;
+    std::vector<BVHNode> getNodes() {
+        return getRawNodes(); 
     }
 };
 
-// =================================================================================
-// HELPER FUNCTIONS
-// =================================================================================
+// --- DATA HELPERS ---
 
-void printUsage(const char* programName) {
-    std::cout << "Usage: " << programName << " [options]\n"
+void printUsage(const char* name) {
+    std::cout << "Usage: " << name << " [options]\n"
               << "Options:\n"
-              << "  -i, --input <file.obj>    Input OBJ file to load\n"
-              << "  -o, --output <file.obj>   Output OBJ file for BVH export\n"
-              << "  -n, --triangles <count>   Number of random triangles (default: 10000000)\n"
-              << "  -l, --leaves-only         Export only leaf node bounding boxes\n"
-              << "  -c, --colab-export        Export BVH in binary format for Colab\n"
-              << "  -h, --help                Show this help message\n";
+              << "  -i, --input <file>       Input OBJ file\n"
+              << "  -o, --output <file>      Output file\n"
+              << "  -n, --triangles <num>    Number of random triangles (default 10M)\n"
+              << "  -l, --leaves-only        Export leaves only to OBJ\n"
+              << "  -c, --colab-export       Export binary dump\n"
+              << "  -h, --help               Show help\n";
 }
 
 TriangleMesh generateRandomTriangles(int n) {
     TriangleMesh mesh;
-    mesh.reserve(n);
-    
+    mesh.resize(n);
+
     for (int i = 0; i < n; ++i) {
         float x = (rand() % 1000) / 10.0f;
         float y = (rand() % 1000) / 10.0f;
         float z = (rand() % 1000) / 10.0f;
-        
-        mesh.addTriangle(
-            Vec3(x, y, z),
-            Vec3(x + 1, y, z),
-            Vec3(x, y + 1, z)
-        );
+        mesh.v0x[i] = x; mesh.v0y[i] = y; mesh.v0z[i] = z;
+        mesh.v1x[i] = x+1; mesh.v1y[i] = y; mesh.v1z[i] = z;
+        mesh.v2x[i] = x; mesh.v2y[i] = y+1; mesh.v2z[i] = z;
     }
     
     return mesh;
 }
 
-// =================================================================================
-// MAIN
-// =================================================================================
+TriangleMesh loadOBJ(const std::string& filename) {
+    TriangleMesh mesh;
+    std::ifstream file(filename);
+    if (!file.is_open()) throw std::runtime_error("Cannot open file");
+
+    std::vector<float3_cw> verts;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.substr(0, 2) == "v ") {
+            std::istringstream s(line.substr(2));
+            float3_cw v;
+            s >> v.x >> v.y >> v.z;
+            verts.push_back(v);
+        } else if (line.substr(0, 2) == "f ") {
+            std::istringstream s(line.substr(2));
+            int idx[3];
+            std::string tmp;
+
+            for(int i=0; i<3; ++i) {
+                s >> tmp;
+                size_t slash = tmp.find('/');
+                idx[i] = std::stoi(tmp.substr(0, slash)) - 1;
+            }
+
+            if(idx[0] < verts.size() && idx[1] < verts.size() && idx[2] < verts.size()) {
+                mesh.v0x.push_back(verts[idx[0]].x); mesh.v0y.push_back(verts[idx[0]].y); mesh.v0z.push_back(verts[idx[0]].z);
+                mesh.v1x.push_back(verts[idx[1]].x); mesh.v1y.push_back(verts[idx[1]].y); mesh.v1z.push_back(verts[idx[1]].z);
+                mesh.v2x.push_back(verts[idx[2]].x); mesh.v2y.push_back(verts[idx[2]].y); mesh.v2z.push_back(verts[idx[2]].z);
+            }
+        }
+    }
+    return mesh;
+}
+
+struct VizNode {
+    float min[3];
+    float max[3];
+    int leftIdx;
+    int rightIdx;
+};
+
+void exportBVHToBinary(const std::string& filename, const std::vector<LBVHNode>& nodes) {
+    std::ofstream file(filename, std::ios::binary);
+    
+    std::vector<VizNode> exportNodes;
+    exportNodes.reserve(nodes.size());
+
+    for(const auto& node : nodes) {
+        VizNode vn;
+        vn.min[0] = node.bbox.min.x; 
+        vn.min[1] = node.bbox.min.y; 
+        vn.min[2] = node.bbox.min.z;
+        
+        vn.max[0] = node.bbox.max.x; 
+        vn.max[1] = node.bbox.max.y; 
+        vn.max[2] = node.bbox.max.z;
+
+        vn.leftIdx = static_cast<int>(node.leftChild);
+        vn.rightIdx = static_cast<int>(node.rightChild);
+        
+        exportNodes.push_back(vn);
+    }
+
+    file.write(reinterpret_cast<const char*>(exportNodes.data()), exportNodes.size() * sizeof(VizNode));
+    std::cout << "Exported " << exportNodes.size() << " nodes to " << filename << " (" << (exportNodes.size() * sizeof(VizNode))/1024/1024 << " MB)\n";
+}
+
+void exportBVHToOBJ(const std::string& filename, const std::vector<BVHNode>& nodes, bool leavesOnly) {
+    std::ofstream file(filename);
+    int v_offset = 1;
+
+    auto writeBox = [&](const AABB_cw& b) {
+        float x0 = b.min.x, y0 = b.min.y, z0 = b.min.z;
+        float x1 = b.max.x, y1 = b.max.y, z1 = b.max.z;
+
+        file << "v " << x0 << " " << y0 << " " << z0 << "\n";
+        file << "v " << x1 << " " << y0 << " " << z0 << "\n";
+        file << "v " << x1 << " " << y1 << " " << z0 << "\n";
+        file << "v " << x0 << " " << y1 << " " << z0 << "\n";
+        file << "v " << x0 << " " << y0 << " " << z1 << "\n";
+        file << "v " << x1 << " " << y0 << " " << z1 << "\n";
+        file << "v " << x1 << " " << y1 << " " << z1 << "\n";
+        file << "v " << x0 << " " << y1 << " " << z1 << "\n";
+
+        int o = v_offset;
+        file << "l " << o << " " << o+1 << " " << o+2 << " " << o+3 << " " << o << "\n"; 
+        file << "l " << o+4 << " " << o+5 << " " << o+6 << " " << o+7 << " " << o+4 << "\n"; 
+        file << "l " << o << " " << o+4 << "\n";
+        file << "l " << o+1 << " " << o+5 << "\n";
+        file << "l " << o+2 << " " << o+6 << "\n";
+        file << "l " << o+3 << " " << o+7 << "\n";
+        v_offset += 8;
+    };
+
+    int numLeafs = (nodes.size() + 1) / 2;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        bool isLeaf = (i >= nodes.size() - numLeafs);
+        
+        bool nodeIsLeaf = (i >= (nodes.size() + 1) / 2 - 1); // Rough check based on array layout
+        if (leavesOnly && !nodeIsLeaf) continue;
+        writeBox(nodes[i].bbox);
+    }
+}
+
+// --- MAIN ---
 
 int main(int argc, char* argv[]) {
     std::string inputFile;
@@ -645,11 +594,11 @@ int main(int argc, char* argv[]) {
 
     LBVHBuilderCUDA builder;
     
-    // 1. Prepare Data (Allocation + Copy) - NOT TIMED
+    // 1. Prepare Data (Allocation + Copy) - Ne tajmira se
     std::cout << "Uploading data to GPU and allocating memory..." << std::endl;
     builder.prepareData(mesh);
 
-    // Optional: Warmup run to initialize CUDA context fully
+    // Opcionlni warm-up run
     // builder.runCompute(mesh.size());
     // CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -660,7 +609,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Starting optimized build..." << std::endl;
     cudaEventRecord(start);
     
-    // 2. Run Compute - TIMED
+    // 2. Run Compute 
     builder.runCompute(mesh.size());
     
     cudaEventRecord(stop);
