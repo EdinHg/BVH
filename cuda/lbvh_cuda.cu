@@ -303,17 +303,27 @@ __global__ void kRefitHierarchy(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numObjects) return;
 
+    // Start at a leaf node
     uint32_t idx = (numObjects - 1) + i;
     
+    // Move up the tree
     while (idx != 0) { 
         uint32_t parent = nodes[idx].parent;
         
-       int oldVal = atomicAdd(&atomicCounters[parent], 1);
+        // Ensure all previous writes to global memory (bounding boxes) 
+        // by this thread are visible to other threads before we signal 
+        // via the atomic counter.
+        __threadfence(); 
+
+        int oldVal = atomicAdd(&atomicCounters[parent], 1);
         
+        // If we are the first thread to arrive, we simply stop.
         if (oldVal == 0) {
            return;
         }
 
+        // If we are the second thread (oldVal == 1), we compute the parent's box.
+        // We know the left and right children are ready.
         uint32_t left = nodes[parent].leftChild;
         uint32_t right = nodes[parent].rightChild;
 
@@ -331,6 +341,7 @@ __global__ void kRefitHierarchy(
 
         nodes[parent].bbox = unionBox;
 
+        // Move up to the next level
         idx = parent;
     }
 }
@@ -402,6 +413,11 @@ public:
         d_nodes.resize(2 * n - 1);
         d_atomicFlags.resize(2 * n - 1);
         
+        LBVHNode initNode;
+        initNode.parent = 0xFFFFFFFF;
+        initNode.leftChild = 0;
+        initNode.rightChild = 0;
+        thrust::fill(d_nodes.begin(), d_nodes.end(), initNode);
         thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
     }
 
@@ -409,6 +425,8 @@ public:
     void runCompute(int n) {
         if (n == 0) return;
         
+        thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
+
         int blockSize = 256;
         int gridSize = (n + blockSize - 1) / blockSize;
 
