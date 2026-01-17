@@ -501,6 +501,12 @@ public:
             thrust::raw_pointer_cast(d_nodes.data()),
             thrust::raw_pointer_cast(d_atomicFlags.data()),
             n);
+
+        cudaError_t err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA Fatal Error: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("GPU Kernel Failed");
+        }
     }
 
     void verify() {
