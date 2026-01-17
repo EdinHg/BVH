@@ -1,5 +1,3 @@
-%%writefile lbvh_cuda.cu
-
 #include <iostream>
 #include <vector>
 #include <algorithm>
