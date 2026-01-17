@@ -27,6 +27,45 @@
 #include "../src/bvh/bvh_export.hpp"
 
 // =================================================================================
+// ZA COLAB EXPORT
+// =================================================================================
+
+struct PackedNode {
+    float min_x, min_y, min_z;
+    float max_x, max_y, max_z;
+    int32_t left;   // Raw child index (includes leaf bit flag)
+    int32_t right;  // Raw child index
+    int32_t parent;
+};
+
+void exportBVHToBinary(const std::string& filename, const std::vector<LBVHNode>& nodes) {
+    std::vector<PackedNode> packed(nodes.size());
+
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        packed[i].min_x = nodes[i].bbox.min.x;
+        packed[i].min_y = nodes[i].bbox.min.y;
+        packed[i].min_z = nodes[i].bbox.min.z;
+        
+        packed[i].max_x = nodes[i].bbox.max.x;
+        packed[i].max_y = nodes[i].bbox.max.y;
+        packed[i].max_z = nodes[i].bbox.max.z;
+
+        packed[i].left = (int32_t)nodes[i].leftChild;
+        packed[i].right = (int32_t)nodes[i].rightChild;
+        packed[i].parent = (int32_t)nodes[i].parent;
+    }
+
+    std::ofstream outfile(filename, std::ios::out | std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Failed to open output file: " << filename << std::endl;
+        return;
+    }
+    outfile.write(reinterpret_cast<const char*>(packed.data()), packed.size() * sizeof(PackedNode));
+    outfile.close();
+    std::cout << "Exported " << packed.size() << " nodes to binary file: " << filename << std::endl;
+}
+
+// =================================================================================
 // DATA STRUCTURES
 // =================================================================================
 
@@ -444,6 +483,12 @@ public:
                   << "[" << root.bbox.max.x << ", " << root.bbox.max.y << ", " << root.bbox.max.z << "]\n";
     }
 
+    std::vector<LBVHNode> getRawNodes() const {
+        if (d_nodes.empty()) return {};
+        thrust::host_vector<LBVHNode> h_nodes = d_nodes;
+        return std::vector<LBVHNode>(h_nodes.begin(), h_nodes.end());
+    }
+
     std::vector<BVHNode> getNodes() const {
         std::vector<LBVHNode> hostNodes(d_nodes.begin(), d_nodes.end());
         std::vector<BVHNode> result;
@@ -526,6 +571,7 @@ int main(int argc, char* argv[]) {
     std::string outputFile;
     int numTriangles = 10000000;  
     bool leavesOnly = false;
+    bool colabExport = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -540,6 +586,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) numTriangles = std::atoi(argv[++i]);
         } else if (arg == "-l" || arg == "--leaves-only") {
             leavesOnly = true;
+        } else if (arg == '-c') {
+            colabExport = true;
         }
     }
 
@@ -595,9 +643,15 @@ int main(int argc, char* argv[]) {
     builder.verify();
 
     if (!outputFile.empty()) {
-        std::cout << "Exporting BVH to: " << outputFile << std::endl;
-        std::vector<BVHNode> nodes = builder.getNodes();
-        exportBVHToOBJ(outputFile, nodes, leavesOnly);
+        if (colabExport) {
+            std::cout << "Exporting BVH to Colab binary format: " << outputFile << std::endl;
+            std::vector<LBVHNode> nodes = builder.getRawNodes();
+            exportBVHToBinary(outputFile, nodes);
+        } else {
+            std::cout << "Exporting BVH to OBJ format: " << outputFile << std::endl;
+            std::vector<BVHNode> bvhNodes = builder.getNodes();
+            exportBVHToOBJ(outputFile, bvhNodes, leavesOnly);
+        }
     }
 
     cudaEventDestroy(start);
