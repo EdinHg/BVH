@@ -303,27 +303,31 @@ __global__ void kRefitHierarchy(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numObjects) return;
 
-    // Start at a leaf node
+    // Start at the leaf node corresponding to this thread
     uint32_t idx = (numObjects - 1) + i;
     
     // Move up the tree
     while (idx != 0) { 
         uint32_t parent = nodes[idx].parent;
         
-        // Ensure all previous writes to global memory (bounding boxes) 
-        // by this thread are visible to other threads before we signal 
-        // via the atomic counter.
+        // =========================================================
+        // FIX 1: Memory Barrier
+        // Ensure that the write to nodes[idx].bbox is globally visible 
+        // BEFORE we increment the counter.
+        // =========================================================
         __threadfence(); 
 
+        // atomicAdd returns the OLD value.
+        // If oldVal == 0, we are the first child to arrive -> We wait/die.
+        // If oldVal == 1, we are the second child -> We process the parent.
         int oldVal = atomicAdd(&atomicCounters[parent], 1);
         
-        // If we are the first thread to arrive, we simply stop.
         if (oldVal == 0) {
-           return;
+           return; // First thread exits
         }
 
-        // If we are the second thread (oldVal == 1), we compute the parent's box.
-        // We know the left and right children are ready.
+        // --- If we are here, we are the second thread ---
+        
         uint32_t left = nodes[parent].leftChild;
         uint32_t right = nodes[parent].rightChild;
 
@@ -341,7 +345,7 @@ __global__ void kRefitHierarchy(
 
         nodes[parent].bbox = unionBox;
 
-        // Move up to the next level
+        // Move up to process the next level
         idx = parent;
     }
 }
@@ -441,6 +445,11 @@ public:
         init.min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
         init.max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
         AABB_cw sceneBounds = thrust::reduce(d_triBBoxes.begin(), d_triBBoxes.end(), init, AABBReduce());
+
+        float3_cw extents = sceneBounds.max - sceneBounds.min;
+        if(extents.x < 1e-6f) sceneBounds.max.x += 1e-6f;
+        if(extents.y < 1e-6f) sceneBounds.max.y += 1e-6f;
+        if(extents.z < 1e-6f) sceneBounds.max.z += 1e-6f;
 
         // 3. Morton Codes
         kComputeMortonCodes<<<gridSize, blockSize>>>(
