@@ -413,11 +413,11 @@ public:
         d_nodes.resize(2 * n - 1);
         d_atomicFlags.resize(2 * n - 1);
         
-        LBVHNode initNode;
-        initNode.parent = 0xFFFFFFFF;
-        initNode.leftChild = 0;
-        initNode.rightChild = 0;
-        thrust::fill(d_nodes.begin(), d_nodes.end(), initNode);
+        // LBVHNode initNode;
+        // initNode.parent = 0xFFFFFFFF;
+        // initNode.leftChild = 0;
+        // initNode.rightChild = 0;
+        // thrust::fill(d_nodes.begin(), d_nodes.end(), initNode);
         thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
     }
 
