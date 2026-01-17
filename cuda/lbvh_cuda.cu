@@ -72,6 +72,46 @@ struct TrianglesSoADevice {
     } while (0)
 
 // =================================================================================
+// ZA COLAB EXPORT
+// =================================================================================
+
+struct PackedNode {
+    float min_x, min_y, min_z;
+    float max_x, max_y, max_z;
+    int32_t left;   // Raw child index (includes leaf bit flag)
+    int32_t right;  // Raw child index
+    int32_t parent;
+};
+
+void exportBVHToBinary(const std::string& filename, const std::vector<LBVHNode>& nodes) {
+    std::vector<PackedNode> packed(nodes.size());
+
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        packed[i].min_x = nodes[i].bbox.min.x;
+        packed[i].min_y = nodes[i].bbox.min.y;
+        packed[i].min_z = nodes[i].bbox.min.z;
+        
+        packed[i].max_x = nodes[i].bbox.max.x;
+        packed[i].max_y = nodes[i].bbox.max.y;
+        packed[i].max_z = nodes[i].bbox.max.z;
+
+        packed[i].left = (int32_t)nodes[i].leftChild;
+        packed[i].right = (int32_t)nodes[i].rightChild;
+        packed[i].parent = (int32_t)nodes[i].parent;
+    }
+
+    std::ofstream outfile(filename, std::ios::out | std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Failed to open output file: " << filename << std::endl;
+        return;
+    }
+    outfile.write(reinterpret_cast<const char*>(packed.data()), packed.size() * sizeof(PackedNode));
+    outfile.close();
+    std::cout << "Exported " << packed.size() << " nodes to binary file: " << filename << std::endl;
+}
+
+
+// =================================================================================
 // DEVICE HELPER FUNCTIONS
 // =================================================================================
 
@@ -263,17 +303,31 @@ __global__ void kRefitHierarchy(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numObjects) return;
 
+    // Start at the leaf node corresponding to this thread
     uint32_t idx = (numObjects - 1) + i;
     
+    // Move up the tree
     while (idx != 0) { 
         uint32_t parent = nodes[idx].parent;
         
-       int oldVal = atomicAdd(&atomicCounters[parent], 1);
+        // =========================================================
+        // FIX 1: Memory Barrier
+        // Ensure that the write to nodes[idx].bbox is globally visible 
+        // BEFORE we increment the counter.
+        // =========================================================
+        __threadfence(); 
+
+        // atomicAdd returns the OLD value.
+        // If oldVal == 0, we are the first child to arrive -> We wait/die.
+        // If oldVal == 1, we are the second child -> We process the parent.
+        int oldVal = atomicAdd(&atomicCounters[parent], 1);
         
         if (oldVal == 0) {
-           return;
+           return; // First thread exits
         }
 
+        // --- If we are here, we are the second thread ---
+        
         uint32_t left = nodes[parent].leftChild;
         uint32_t right = nodes[parent].rightChild;
 
@@ -291,6 +345,7 @@ __global__ void kRefitHierarchy(
 
         nodes[parent].bbox = unionBox;
 
+        // Move up to process the next level
         idx = parent;
     }
 }
@@ -362,6 +417,11 @@ public:
         d_nodes.resize(2 * n - 1);
         d_atomicFlags.resize(2 * n - 1);
         
+        // LBVHNode initNode;
+        // initNode.parent = 0xFFFFFFFF;
+        // initNode.leftChild = 0;
+        // initNode.rightChild = 0;
+        // thrust::fill(d_nodes.begin(), d_nodes.end(), initNode);
         thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
     }
 
@@ -369,6 +429,8 @@ public:
     void runCompute(int n) {
         if (n == 0) return;
         
+        thrust::fill(d_atomicFlags.begin(), d_atomicFlags.end(), 0);
+
         int blockSize = 256;
         int gridSize = (n + blockSize - 1) / blockSize;
 
@@ -383,6 +445,11 @@ public:
         init.min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
         init.max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
         AABB_cw sceneBounds = thrust::reduce(d_triBBoxes.begin(), d_triBBoxes.end(), init, AABBReduce());
+
+        float3_cw extents = sceneBounds.max - sceneBounds.min;
+        if(extents.x < 1e-6f) sceneBounds.max.x += 1e-6f;
+        if(extents.y < 1e-6f) sceneBounds.max.y += 1e-6f;
+        if(extents.z < 1e-6f) sceneBounds.max.z += 1e-6f;
 
         // 3. Morton Codes
         kComputeMortonCodes<<<gridSize, blockSize>>>(
@@ -434,6 +501,12 @@ public:
             thrust::raw_pointer_cast(d_nodes.data()),
             thrust::raw_pointer_cast(d_atomicFlags.data()),
             n);
+
+        cudaError_t err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA Fatal Error: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("GPU Kernel Failed");
+        }
     }
 
     void verify() {
@@ -444,29 +517,48 @@ public:
                   << "[" << root.bbox.max.x << ", " << root.bbox.max.y << ", " << root.bbox.max.z << "]\n";
     }
 
+    std::vector<LBVHNode> getRawNodes() const {
+        if (d_nodes.empty()) return {};
+        thrust::host_vector<LBVHNode> h_nodes = d_nodes;
+        return std::vector<LBVHNode>(h_nodes.begin(), h_nodes.end());
+    }
+
     std::vector<BVHNode> getNodes() const {
         std::vector<LBVHNode> hostNodes(d_nodes.begin(), d_nodes.end());
         std::vector<BVHNode> result;
         result.reserve(hostNodes.size());
+        
+        int numInternal = 0;
+        int numLeaves = 0;
         
         for (size_t i = 0; i < hostNodes.size(); ++i) {
             const auto& node = hostNodes[i];
             BVHNode bvhNode;
             bvhNode.bounds.min = Vec3(node.bbox.min.x, node.bbox.min.y, node.bbox.min.z);
             bvhNode.bounds.max = Vec3(node.bbox.max.x, node.bbox.max.y, node.bbox.max.z);
+            bvhNode.axis = 0;
             
             if (node.leftChild & 0x80000000) {
+                // Leaf node
                 bvhNode.childCount = 0;  
+                bvhNode.childOffset = 0;
                 bvhNode.primOffset = node.leftChild & 0x7FFFFFFF;  
                 bvhNode.primCount = 1;
+                numLeaves++;
             } else {
+                // Internal node
                 bvhNode.childCount = 2;  
                 bvhNode.childOffset = node.leftChild;  
+                bvhNode.primOffset = node.rightChild;
                 bvhNode.primCount = 0;
+                numInternal++;
             }
-            bvhNode.axis = 0;
             result.push_back(bvhNode);
         }
+        
+        std::cout << "Total nodes: " << hostNodes.size() 
+                  << " (internal: " << numInternal << ", leaves: " << numLeaves << ")\n";
+        
         return result;
     }
 };
@@ -482,6 +574,7 @@ void printUsage(const char* programName) {
               << "  -o, --output <file.obj>   Output OBJ file for BVH export\n"
               << "  -n, --triangles <count>   Number of random triangles (default: 10000000)\n"
               << "  -l, --leaves-only         Export only leaf node bounding boxes\n"
+              << "  -c, --colab-export        Export BVH in binary format for Colab\n"
               << "  -h, --help                Show this help message\n";
 }
 
@@ -513,6 +606,7 @@ int main(int argc, char* argv[]) {
     std::string outputFile;
     int numTriangles = 10000000;  
     bool leavesOnly = false;
+    bool colabExport = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -527,6 +621,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) numTriangles = std::atoi(argv[++i]);
         } else if (arg == "-l" || arg == "--leaves-only") {
             leavesOnly = true;
+        } else if (arg == "-c" || arg == "--colab-export") {
+            colabExport = true;
         }
     }
 
@@ -582,9 +678,15 @@ int main(int argc, char* argv[]) {
     builder.verify();
 
     if (!outputFile.empty()) {
-        std::cout << "Exporting BVH to: " << outputFile << std::endl;
-        std::vector<BVHNode> nodes = builder.getNodes();
-        exportBVHToOBJ(outputFile, nodes, leavesOnly);
+        if (colabExport) {
+            std::cout << "Exporting BVH to Colab binary format: " << outputFile << std::endl;
+            std::vector<LBVHNode> nodes = builder.getRawNodes();
+            exportBVHToBinary(outputFile, nodes);
+        } else {
+            std::cout << "Exporting BVH to OBJ format: " << outputFile << std::endl;
+            std::vector<BVHNode> bvhNodes = builder.getNodes();
+            exportBVHToOBJ(outputFile, bvhNodes, leavesOnly);
+        }
     }
 
     cudaEventDestroy(start);
