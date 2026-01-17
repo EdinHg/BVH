@@ -7,6 +7,7 @@
 #include <float.h>
 #include <iomanip>
 #include <string>
+#include <fstream>
 
 // CUDA includes
 #include <cuda_runtime.h>
@@ -418,6 +419,9 @@ private:
 
     int numTriangles;
 
+    // Profiling Events
+    cudaEvent_t start, e_centroids, e_morton, e_sort, e_topology, stop;
+
     TrianglesSoADevice getDevicePtrs() {
         return {d_v0x, d_v0y, d_v0z, d_v1x, d_v1y, d_v1z, d_v2x, d_v2y, d_v2z};
     }
@@ -430,7 +434,14 @@ public:
         d_triBBoxes(nullptr), d_centroids(nullptr),
         d_mortonCodes(nullptr), d_indices(nullptr),
         d_nodes(nullptr), d_atomicFlags(nullptr),
-        d_boundsReduction(nullptr), numTriangles(0) {}
+        d_boundsReduction(nullptr), numTriangles(0) {
+        cudaEventCreate(&start);
+        cudaEventCreate(&e_centroids);
+        cudaEventCreate(&e_morton);
+        cudaEventCreate(&e_sort);
+        cudaEventCreate(&e_topology);
+        cudaEventCreate(&stop);
+    }
 
     ~LBVHBuilderCUDA() {
         // Free all allocated memory
@@ -450,6 +461,14 @@ public:
         if (d_nodes) cudaFree(d_nodes);
         if (d_atomicFlags) cudaFree(d_atomicFlags);
         if (d_boundsReduction) cudaFree(d_boundsReduction);
+
+        // Destroy profiling events
+        cudaEventDestroy(start);
+        cudaEventDestroy(e_centroids);
+        cudaEventDestroy(e_morton);
+        cudaEventDestroy(e_sort);
+        cudaEventDestroy(e_topology);
+        cudaEventDestroy(stop);
     }
 
     // PHASE 1: Data Upload (Not part of compute benchmark)
@@ -502,6 +521,8 @@ public:
         int blockSize = 256;
         int gridSize = (numTriangles + blockSize - 1) / blockSize;
 
+        cudaEventRecord(start);
+
         // 1. Compute Bounds and Centroids
         kComputeBoundsAndCentroids<<<gridSize, blockSize>>>(
             getDevicePtrs(), numTriangles, d_triBBoxes, d_centroids);
@@ -521,14 +542,20 @@ public:
         AABB_cw sceneBounds;
         CUDA_CHECK(cudaMemcpy(&sceneBounds, d_boundsReduction, sizeof(AABB_cw), cudaMemcpyDeviceToHost));
 
+        cudaEventRecord(e_centroids);
+
         // 3. Compute Morton Codes
         kComputeMortonCodes<<<gridSize, blockSize>>>(
             d_centroids, numTriangles, sceneBounds, d_mortonCodes, d_indices);
+
+        cudaEventRecord(e_morton);
 
         // 4. Sort (Radix Sort)
         thrust::device_ptr<uint32_t> mortonPtr(d_mortonCodes);
         thrust::device_ptr<uint32_t> indicesPtr(d_indices);
         thrust::sort_by_key(mortonPtr, mortonPtr + numTriangles, indicesPtr);
+
+        cudaEventRecord(e_sort);
 
         // 5. Build Hierarchy
         int internalGridSize = (numTriangles - 1 + blockSize - 1) / blockSize;
@@ -539,9 +566,31 @@ public:
         kInitLeafNodes<<<gridSize, blockSize>>>(
             d_nodes, d_triBBoxes, d_indices, numTriangles);
 
+        cudaEventRecord(e_topology);
+
         // 7. Refit BBoxes (Bottom Up)
         kRefitHierarchy<<<gridSize, blockSize>>>(
             d_nodes, d_atomicFlags, numTriangles);
+
+        cudaEventRecord(stop);
+
+        // Print Breakdown
+        cudaEventSynchronize(stop);
+        float t_c, t_m, t_s, t_t, t_r;
+        cudaEventElapsedTime(&t_c, start, e_centroids);
+        cudaEventElapsedTime(&t_m, e_centroids, e_morton);
+        cudaEventElapsedTime(&t_s, e_morton, e_sort);
+        cudaEventElapsedTime(&t_t, e_sort, e_topology);
+        cudaEventElapsedTime(&t_r, e_topology, stop);
+        float total = t_c + t_m + t_s + t_t + t_r;
+
+        std::cout << "\n   [GPU Phase Breakdown]\n";
+        std::cout << "   Bounds/Centroids: " << std::setw(6) << t_c << " ms\n";
+        std::cout << "   Morton Codes:     " << std::setw(6) << t_m << " ms\n";
+        std::cout << "   Radix Sort:       " << std::setw(6) << t_s << " ms\n";
+        std::cout << "   Topology Build:   " << std::setw(6) << t_t << " ms\n";
+        std::cout << "   Bottom-Up Refit:  " << std::setw(6) << t_r << " ms\n";
+        std::cout << "   Total Kernel Time:" << std::setw(6) << total << " ms\n\n";
     }
 
     // Helper to verify root bounds on host
@@ -596,14 +645,93 @@ void printUsage(const char* programName) {
     std::cout << "Usage: " << programName << " [options]\n"
               << "Options:\n"
               << "  -i, --input <file.obj>    Input OBJ file to load\n"
-              << "  -o, --output <file.obj>   Output OBJ file for BVH export\n"
+              << "  -o, --output <file>       Output file for BVH export\n"
               << "  -n, --triangles <count>   Number of random triangles (default: 10000000)\n"
               << "  -l, --leaves-only         Export only leaf node bounding boxes\n"
+              << "  -c, --colab-export        Export binary dump for Colab visualization\n"
               << "  -h, --help                Show this help message\n"
               << "\nExamples:\n"
               << "  " << programName << " -i model.obj -o bvh.obj\n"
               << "  " << programName << " -n 1000000 -o bvh.obj\n"
-              << "  " << programName << " -i model.obj -o bvh.obj -l\n";
+              << "  " << programName << " -i model.obj -o bvh.obj -l\n"
+              << "  " << programName << " -i model.obj -o bvh.bin -c\n";
+}
+
+// ------------------------------------------------------------------
+// Binary Export for Colab Visualization
+// ------------------------------------------------------------------
+
+struct VizNode {
+    float min[3];
+    float max[3];
+    int leftIdx;
+    int rightIdx;
+};
+
+void exportBVHToBinary(const std::string& filename, const std::vector<BVHNode>& nodes) {
+    std::ofstream file(filename, std::ios::binary);
+
+    std::vector<VizNode> exportNodes;
+    exportNodes.reserve(nodes.size());
+
+    for(const auto& node : nodes) {
+        VizNode vn;
+        vn.min[0] = node.bbox.min.x;
+        vn.min[1] = node.bbox.min.y;
+        vn.min[2] = node.bbox.min.z;
+
+        vn.max[0] = node.bbox.max.x;
+        vn.max[1] = node.bbox.max.y;
+        vn.max[2] = node.bbox.max.z;
+
+        vn.leftIdx = static_cast<int>(node.leftChild);
+        vn.rightIdx = static_cast<int>(node.rightChild);
+
+        exportNodes.push_back(vn);
+    }
+
+    file.write(reinterpret_cast<const char*>(exportNodes.data()), exportNodes.size() * sizeof(VizNode));
+    std::cout << "Exported " << exportNodes.size() << " nodes to " << filename
+              << " (" << (exportNodes.size() * sizeof(VizNode))/1024/1024 << " MB)\n";
+}
+
+// ------------------------------------------------------------------
+// OBJ Export for Visualization
+// ------------------------------------------------------------------
+
+void exportBVHToOBJ(const std::string& filename, const std::vector<BVHNode>& nodes, bool leavesOnly) {
+    std::ofstream file(filename);
+    int v_offset = 1;
+
+    auto writeBox = [&](const AABB_cw& b) {
+        float x0 = b.min.x, y0 = b.min.y, z0 = b.min.z;
+        float x1 = b.max.x, y1 = b.max.y, z1 = b.max.z;
+
+        file << "v " << x0 << " " << y0 << " " << z0 << "\n";
+        file << "v " << x1 << " " << y0 << " " << z0 << "\n";
+        file << "v " << x1 << " " << y1 << " " << z0 << "\n";
+        file << "v " << x0 << " " << y1 << " " << z0 << "\n";
+        file << "v " << x0 << " " << y0 << " " << z1 << "\n";
+        file << "v " << x1 << " " << y0 << " " << z1 << "\n";
+        file << "v " << x1 << " " << y1 << " " << z1 << "\n";
+        file << "v " << x0 << " " << y1 << " " << z1 << "\n";
+
+        int o = v_offset;
+        file << "l " << o << " " << o+1 << " " << o+2 << " " << o+3 << " " << o << "\n";
+        file << "l " << o+4 << " " << o+5 << " " << o+6 << " " << o+7 << " " << o+4 << "\n";
+        file << "l " << o << " " << o+4 << "\n";
+        file << "l " << o+1 << " " << o+5 << "\n";
+        file << "l " << o+2 << " " << o+6 << "\n";
+        file << "l " << o+3 << " " << o+7 << "\n";
+        v_offset += 8;
+    };
+
+    int numLeafs = (nodes.size() + 1) / 2;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        bool nodeIsLeaf = (i >= (nodes.size() + 1) / 2 - 1);
+        if (leavesOnly && !nodeIsLeaf) continue;
+        writeBox(nodes[i].bbox);
+    }
 }
 
 // ------------------------------------------------------------------
@@ -638,6 +766,7 @@ int main(int argc, char* argv[]) {
     std::string outputFile;
     int numTriangles = 10000000;  // Default: 10 million
     bool leavesOnly = false;
+    bool colabExport = false;
 
     // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
@@ -673,6 +802,8 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "-l" || arg == "--leaves-only") {
             leavesOnly = true;
+        } else if (arg == "-c" || arg == "--colab-export") {
+            colabExport = true;
         } else {
             std::cerr << "Error: Unknown option: " << arg << "\n";
             printUsage(argv[0]);
@@ -734,15 +865,26 @@ int main(int argc, char* argv[]) {
 
     // Export BVH if output file specified
     if (!outputFile.empty()) {
-        std::cout << "Exporting BVH to: " << outputFile << std::endl;
-        try {
-            std::vector<BVHNode> nodes = builder.getNodes();
-            exportBVHToOBJ(outputFile, nodes, leavesOnly);
-            std::cout << "Exported " << nodes.size() << " BVH nodes"
-                      << (leavesOnly ? " (leaves only)" : "") << std::endl;
-        } catch (const std::exception& e) {
-            std::cerr << "Error exporting BVH: " << e.what() << std::endl;
-            return 1;
+        if (colabExport) {
+            std::cout << "Exporting BVH to Colab binary format: " << outputFile << std::endl;
+            try {
+                std::vector<BVHNode> nodes = builder.getNodes();
+                exportBVHToBinary(outputFile, nodes);
+            } catch (const std::exception& e) {
+                std::cerr << "Error exporting BVH: " << e.what() << std::endl;
+                return 1;
+            }
+        } else {
+            std::cout << "Exporting BVH to OBJ format: " << outputFile << std::endl;
+            try {
+                std::vector<BVHNode> nodes = builder.getNodes();
+                exportBVHToOBJ(outputFile, nodes, leavesOnly);
+                std::cout << "Exported " << nodes.size() << " BVH nodes"
+                          << (leavesOnly ? " (leaves only)" : "") << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Error exporting BVH: " << e.what() << std::endl;
+                return 1;
+            }
         }
     }
 
