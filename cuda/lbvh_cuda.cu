@@ -541,6 +541,7 @@ void printUsage(const char* programName) {
               << "  -o, --output <file.obj>   Output OBJ file for BVH export\n"
               << "  -n, --triangles <count>   Number of random triangles (default: 10000000)\n"
               << "  -l, --leaves-only         Export only leaf node bounding boxes\n"
+              << "  -c, --colab-export        Export BVH in binary format for Colab\n"
               << "  -h, --help                Show this help message\n";
 }
 
@@ -587,7 +588,7 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) numTriangles = std::atoi(argv[++i]);
         } else if (arg == "-l" || arg == "--leaves-only") {
             leavesOnly = true;
-        } else if (arg == '-c') {
+        } else if (arg == "-c" || arg == "--colab-export") {
             colabExport = true;
         }
     }
