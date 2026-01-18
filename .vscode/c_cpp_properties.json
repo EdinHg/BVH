@@ -3,7 +3,9 @@
         {
             "name": "Win32",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1/include",
+                "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1/include/cccl"
             ],
             "defines": [
                 "_DEBUG",

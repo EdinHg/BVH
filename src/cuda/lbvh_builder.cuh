@@ -1,0 +1,61 @@
+#pragma once
+
+#include "../../include/bvh_builder.h"
+#include "../../include/common.h"
+#include <thrust/device_vector.h>
+#include <cuda_runtime.h>
+#include <sstream>
+
+// LBVH-specific node structure (used internally)
+struct LBVHNode {
+    AABB_cw bbox;
+    uint32_t leftChild;  
+    uint32_t rightChild;
+    uint32_t parent;     
+};
+
+class LBVHBuilderCUDA : public BVHBuilder {
+private:
+    // Device Vectors
+    thrust::device_vector<float> d_v0x, d_v0y, d_v0z;
+    thrust::device_vector<float> d_v1x, d_v1y, d_v1z;
+    thrust::device_vector<float> d_v2x, d_v2y, d_v2z;
+    thrust::device_vector<AABB_cw> d_triBBoxes;
+    thrust::device_vector<float3_cw> d_centroids;
+    thrust::device_vector<uint32_t> d_mortonCodes;
+    thrust::device_vector<uint32_t> d_indices;
+    thrust::device_vector<LBVHNode> d_nodes;
+    thrust::device_vector<int> d_atomicFlags;
+
+    // Host-side results
+    std::vector<BVHNode> h_nodes;
+    std::vector<uint32_t> h_indices;
+    float lastBuildTimeMs;
+    
+    // Timing breakdown
+    float time_centroids;
+    float time_morton;
+    float time_sort;
+    float time_topology;
+    float time_refit;
+
+    // Profiling Events
+    cudaEvent_t start, e_centroids, e_morton, e_sort, e_topology, stop;
+
+    TrianglesSoADevice getDevicePtrs();
+    void prepareData(const TriangleMesh& mesh);
+    void runCompute(int n);
+    void downloadResults(int n);
+
+public:
+    LBVHBuilderCUDA();
+    ~LBVHBuilderCUDA();
+
+    // BVHBuilder interface implementation
+    std::string getName() const override { return "LBVH"; }
+    void build(const TriangleMesh& mesh) override;
+    const std::vector<BVHNode>& getNodes() const override { return h_nodes; }
+    const std::vector<uint32_t>& getIndices() const override { return h_indices; }
+    float getLastBuildTimeMS() const override { return lastBuildTimeMs; }
+    std::string getTimingBreakdown() const override;
+};
