@@ -162,73 +162,123 @@ __global__ void kFillZero(int* data, int n) {
 
 // 4. Parallel reduction for scene bounds (Step 1: Block-level reduction)
 __global__ void kReduceBounds_Step1(const AABB_cw* input, AABB_cw* output, int n) {
-    __shared__ AABB_cw sdata[256];
+    __shared__ float sdata_min_x[256];
+    __shared__ float sdata_min_y[256];
+    __shared__ float sdata_min_z[256];
+    __shared__ float sdata_max_x[256];
+    __shared__ float sdata_max_y[256];
+    __shared__ float sdata_max_z[256];
 
     int tid = threadIdx.x;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     // Load data into shared memory
     if (i < n) {
-        sdata[tid] = input[i];
+        sdata_min_x[tid] = input[i].min.x;
+        sdata_min_y[tid] = input[i].min.y;
+        sdata_min_z[tid] = input[i].min.z;
+        sdata_max_x[tid] = input[i].max.x;
+        sdata_max_y[tid] = input[i].max.y;
+        sdata_max_z[tid] = input[i].max.z;
     } else {
         // Initialize with invalid bounds
-        sdata[tid].min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
-        sdata[tid].max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+        sdata_min_x[tid] = FLT_MAX;
+        sdata_min_y[tid] = FLT_MAX;
+        sdata_min_z[tid] = FLT_MAX;
+        sdata_max_x[tid] = -FLT_MAX;
+        sdata_max_y[tid] = -FLT_MAX;
+        sdata_max_z[tid] = -FLT_MAX;
     }
     __syncthreads();
 
     // Reduce within block
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            sdata[tid].min.x = fminf(sdata[tid].min.x, sdata[tid + s].min.x);
-            sdata[tid].min.y = fminf(sdata[tid].min.y, sdata[tid + s].min.y);
-            sdata[tid].min.z = fminf(sdata[tid].min.z, sdata[tid + s].min.z);
-
-            sdata[tid].max.x = fmaxf(sdata[tid].max.x, sdata[tid + s].max.x);
-            sdata[tid].max.y = fmaxf(sdata[tid].max.y, sdata[tid + s].max.y);
-            sdata[tid].max.z = fmaxf(sdata[tid].max.z, sdata[tid + s].max.z);
+            sdata_min_x[tid] = fminf(sdata_min_x[tid], sdata_min_x[tid + s]);
+            sdata_min_y[tid] = fminf(sdata_min_y[tid], sdata_min_y[tid + s]);
+            sdata_min_z[tid] = fminf(sdata_min_z[tid], sdata_min_z[tid + s]);
+            sdata_max_x[tid] = fmaxf(sdata_max_x[tid], sdata_max_x[tid + s]);
+            sdata_max_y[tid] = fmaxf(sdata_max_y[tid], sdata_max_y[tid + s]);
+            sdata_max_z[tid] = fmaxf(sdata_max_z[tid], sdata_max_z[tid + s]);
         }
         __syncthreads();
     }
 
     // Write result for this block
     if (tid == 0) {
-        output[blockIdx.x] = sdata[0];
+        output[blockIdx.x].min.x = sdata_min_x[0];
+        output[blockIdx.x].min.y = sdata_min_y[0];
+        output[blockIdx.x].min.z = sdata_min_z[0];
+        output[blockIdx.x].max.x = sdata_max_x[0];
+        output[blockIdx.x].max.y = sdata_max_y[0];
+        output[blockIdx.x].max.z = sdata_max_z[0];
     }
 }
 
-// 5. Final reduction (Step 2: Reduce block results)
 __global__ void kReduceBounds_Step2(AABB_cw* data, int n) {
-    __shared__ AABB_cw sdata[256];
+    __shared__ float sdata_min_x[256];
+    __shared__ float sdata_min_y[256];
+    __shared__ float sdata_min_z[256];
+    __shared__ float sdata_max_x[256];
+    __shared__ float sdata_max_y[256];
+    __shared__ float sdata_max_z[256];
 
     int tid = threadIdx.x;
 
-    if (tid < n) {
-        sdata[tid] = data[tid];
-    } else {
-        sdata[tid].min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
-        sdata[tid].max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    // 1. Initialize local registers to opposite infinity
+    float local_min_x = FLT_MAX;
+    float local_min_y = FLT_MAX;
+    float local_min_z = FLT_MAX;
+    float local_max_x = -FLT_MAX;
+    float local_max_y = -FLT_MAX;
+    float local_max_z = -FLT_MAX;
+
+    // 2. Loop over the input array (stride by blockDim.x)
+    // This ensures we process ALL blocks from Step 1, not just the first 256.
+    int i = tid;
+    while (i < n) {
+        local_min_x = fminf(local_min_x, data[i].min.x);
+        local_min_y = fminf(local_min_y, data[i].min.y);
+        local_min_z = fminf(local_min_z, data[i].min.z);
+        local_max_x = fmaxf(local_max_x, data[i].max.x);
+        local_max_y = fmaxf(local_max_y, data[i].max.y);
+        local_max_z = fmaxf(local_max_z, data[i].max.z);
+        i += blockDim.x;
     }
+
+    // 3. Store accumulated local result into shared memory
+    sdata_min_x[tid] = local_min_x;
+    sdata_min_y[tid] = local_min_y;
+    sdata_min_z[tid] = local_min_z;
+    sdata_max_x[tid] = local_max_x;
+    sdata_max_y[tid] = local_max_y;
+    sdata_max_z[tid] = local_max_z;
+    
     __syncthreads();
 
+    // 4. Standard Block Reduction (256 -> 1)
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s && tid + s < n) {
-            sdata[tid].min.x = fminf(sdata[tid].min.x, sdata[tid + s].min.x);
-            sdata[tid].min.y = fminf(sdata[tid].min.y, sdata[tid + s].min.y);
-            sdata[tid].min.z = fminf(sdata[tid].min.z, sdata[tid + s].min.z);
-
-            sdata[tid].max.x = fmaxf(sdata[tid].max.x, sdata[tid + s].max.x);
-            sdata[tid].max.y = fmaxf(sdata[tid].max.y, sdata[tid + s].max.y);
-            sdata[tid].max.z = fmaxf(sdata[tid].max.z, sdata[tid + s].max.z);
+        if (tid < s) {
+            sdata_min_x[tid] = fminf(sdata_min_x[tid], sdata_min_x[tid + s]);
+            sdata_min_y[tid] = fminf(sdata_min_y[tid], sdata_min_y[tid + s]);
+            sdata_min_z[tid] = fminf(sdata_min_z[tid], sdata_min_z[tid + s]);
+            sdata_max_x[tid] = fmaxf(sdata_max_x[tid], sdata_max_x[tid + s]);
+            sdata_max_y[tid] = fmaxf(sdata_max_y[tid], sdata_max_y[tid + s]);
+            sdata_max_z[tid] = fmaxf(sdata_max_z[tid], sdata_max_z[tid + s]);
         }
         __syncthreads();
     }
 
+    // 5. Write final result to index 0
     if (tid == 0) {
-        data[0] = sdata[0];
+        data[0].min.x = sdata_min_x[0];
+        data[0].min.y = sdata_min_y[0];
+        data[0].min.z = sdata_min_z[0];
+        data[0].max.x = sdata_max_x[0];
+        data[0].max.y = sdata_max_y[0];
+        data[0].max.z = sdata_max_z[0];
     }
 }
-
 // 6. Compute Morton Codes
 __global__ void kComputeMortonCodes(
     const float3_cw* centroids,
@@ -253,6 +303,7 @@ __global__ void kComputeMortonCodes(
     indices[i] = i;
 }
 
+/*
 // 7. Build Internal Nodes (Topology)
 __global__ void kBuildInternalNodes(
     const uint32_t* sortedMortonCodes,
@@ -324,6 +375,53 @@ __global__ void kBuildInternalNodes(
     nodes[leftIdx].parent = i;
     nodes[rightIdx].parent = i;
 }
+*/
+
+__global__ void kBuildInternalNodes(const uint32_t* sortedMortonCodes, const uint32_t* sortedIndices, LBVHNode* nodes, int numObjects) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i >= numObjects - 1) return;
+
+    int d = 
+        (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + 1) - 
+         delta(sortedMortonCodes, sortedIndices, numObjects, i, i - 1)) >= 0 ? 1 : -1;
+
+    int min_delta = delta(sortedMortonCodes, sortedIndices, numObjects, i, i - d);
+    int l_max = 2;
+
+    while (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + l_max * d) > min_delta) l_max *= 2;
+
+    int l = 0;
+
+    for (int t = l_max / 2; t >= 1; t /= 2) {
+        if (delta(sortedMortonCodes, sortedIndices, numObjects, i, i + (l + t) * d) > min_delta) l += t;
+    }
+
+    int j = i + l * d;
+    int delta_node = delta(sortedMortonCodes, sortedIndices, numObjects, i, j);
+
+    int s = 0;
+
+    int first = (d > 0) ? i : j;
+    int last = (d > 0) ? j : i;
+    int len = last - first;
+    int t = len;
+
+    do {
+        t = (t + 1) >> 1;
+        if (delta(sortedMortonCodes, sortedIndices, numObjects, first, first + s + t) > delta_node) s += t;
+    } while (t > 1);
+
+    int split = first + s;
+
+    uint32_t leftIdx = (split == first) ? (numObjects - 1) + split : split;
+    uint32_t rightIdx = (split + 1 == last) ? (numObjects - 1) + split + 1 : split + 1;
+
+    nodes[i].leftChild = leftIdx;
+    nodes[i].rightChild = rightIdx;
+    nodes[leftIdx].parent = i;
+    nodes[rightIdx].parent = i;
+}
 
 // 8. Initialize Leaf Nodes
 __global__ void kInitLeafNodes(
@@ -345,34 +443,27 @@ __global__ void kInitLeafNodes(
     nodes[leafIdx].rightChild = 0xFFFFFFFF;
 }
 
-// 9. Compute Bounding Boxes (Bottom-Up)
-__global__ void kRefitHierarchy(
-    LBVHNode* nodes,
-    int* atomicCounters,
-    int numObjects)
-{
+__global__ void kRefitHierarchy(LBVHNode* nodes, int* atomicCounters, int numObjects) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numObjects) return;
 
-    // Start at leaf
     uint32_t idx = (numObjects - 1) + i;
 
-    // Walk up the tree
-    while (idx != 0) { // While not root
+    while (idx != 0) {
         uint32_t parent = nodes[idx].parent;
 
-        // Atomic increment: returns old value
-        // 0 -> First thread arriving. Terminate.
-        // 1 -> Second thread arriving. Process node.
+        // Ensure all writes to global memory (nodes[idx].bbox) are visible 
+        // to other threads before we increment the flag.
+        __threadfence(); 
+
         int oldVal = atomicAdd(&atomicCounters[parent], 1);
 
         if (oldVal == 0) {
-            // First child arrived, exit.
-            // The second child will process the parent.
+            // First thread to arrive. Exit.
             return;
         }
 
-        // Processing parent (merging children)
+        // Second thread processing...
         uint32_t left = nodes[parent].leftChild;
         uint32_t right = nodes[parent].rightChild;
 
@@ -388,10 +479,8 @@ __global__ void kRefitHierarchy(
         unionBox.max.y = fmaxf(leftBox.max.y, rightBox.max.y);
         unionBox.max.z = fmaxf(leftBox.max.z, rightBox.max.z);
 
-        // Store result
         nodes[parent].bbox = unionBox;
 
-        // Move up
         idx = parent;
     }
 }
@@ -515,62 +604,63 @@ public:
     }
 
     // PHASE 2: Pure Compute (Benchmarked)
-    void runCompute() {
-        if (numTriangles == 0) return;
+    void runCompute(int n) {
+        if (n == 0) return;
 
         int blockSize = 256;
-        int gridSize = (numTriangles + blockSize - 1) / blockSize;
+        int gridSize = (n + blockSize - 1) / blockSize;
+
+        // Reset atomic flags to 0 before refit
+        kFillZero<<<gridSize, blockSize>>>(d_atomicFlags, 2 * n - 1);
+        CUDA_CHECK(cudaDeviceSynchronize());
 
         cudaEventRecord(start);
 
-        // 1. Compute Bounds and Centroids
-        kComputeBoundsAndCentroids<<<gridSize, blockSize>>>(
-            getDevicePtrs(), numTriangles, d_triBBoxes, d_centroids);
+        // 1. Centroids
+        kComputeBoundsAndCentroids<<<gridSize, blockSize>>>(getDevicePtrs(), n,
+            d_triBBoxes, d_centroids);
 
         // 2. Reduce scene bounds
         int numBlocks = gridSize;
         CUDA_CHECK(cudaMalloc(&d_boundsReduction, numBlocks * sizeof(AABB_cw)));
 
-        kReduceBounds_Step1<<<numBlocks, blockSize>>>(d_triBBoxes, d_boundsReduction, numTriangles);
+        kReduceBounds_Step1<<<numBlocks, blockSize>>>(d_triBBoxes, d_boundsReduction, n);
 
-        // Final reduction on single block
         if (numBlocks > 1) {
             kReduceBounds_Step2<<<1, blockSize>>>(d_boundsReduction, numBlocks);
         }
 
-        // Copy final result back
         AABB_cw sceneBounds;
         CUDA_CHECK(cudaMemcpy(&sceneBounds, d_boundsReduction, sizeof(AABB_cw), cudaMemcpyDeviceToHost));
 
         cudaEventRecord(e_centroids);
 
-        // 3. Compute Morton Codes
+        // 2. Morton Codes
         kComputeMortonCodes<<<gridSize, blockSize>>>(
-            d_centroids, numTriangles, sceneBounds, d_mortonCodes, d_indices);
+            d_centroids, n, sceneBounds, d_mortonCodes, d_indices);
 
         cudaEventRecord(e_morton);
 
-        // 4. Sort (Radix Sort)
+        // 3. Sort
         thrust::device_ptr<uint32_t> mortonPtr(d_mortonCodes);
         thrust::device_ptr<uint32_t> indicesPtr(d_indices);
-        thrust::sort_by_key(mortonPtr, mortonPtr + numTriangles, indicesPtr);
+        thrust::sort_by_key(mortonPtr, mortonPtr + n, indicesPtr);
 
         cudaEventRecord(e_sort);
 
-        // 5. Build Hierarchy
-        int internalGridSize = (numTriangles - 1 + blockSize - 1) / blockSize;
+        // 4. Topology
+        int internalGridSize = (n - 1 + blockSize - 1) / blockSize;
         kBuildInternalNodes<<<internalGridSize, blockSize>>>(
-            d_mortonCodes, d_indices, d_nodes, numTriangles);
+            d_mortonCodes, d_indices, d_nodes, n);
 
-        // 6. Init Leaves
         kInitLeafNodes<<<gridSize, blockSize>>>(
-            d_nodes, d_triBBoxes, d_indices, numTriangles);
+            d_nodes, d_triBBoxes, d_indices, n);
 
         cudaEventRecord(e_topology);
 
-        // 7. Refit BBoxes (Bottom Up)
+        // 5. Refit
         kRefitHierarchy<<<gridSize, blockSize>>>(
-            d_nodes, d_atomicFlags, numTriangles);
+            d_nodes, d_atomicFlags, n);
 
         cudaEventRecord(stop);
 
@@ -593,14 +683,14 @@ public:
         std::cout << "   Total Kernel Time:" << std::setw(6) << total << " ms\n\n";
     }
 
-    // Helper to verify root bounds on host
     void verify() {
         if(!d_nodes) return;
-        LBVHNode root;
-        CUDA_CHECK(cudaMemcpy(&root, d_nodes, sizeof(LBVHNode), cudaMemcpyDeviceToHost));
-        std::cout << "Root Bounds: "
-                  << "[" << root.bbox.min.x << ", " << root.bbox.min.y << ", " << root.bbox.min.z << "] - "
-                  << "[" << root.bbox.max.x << ", " << root.bbox.max.y << ", " << root.bbox.max.z << "]\n";
+        LBVHNode hostRoot;
+        CUDA_CHECK(cudaMemcpy(&hostRoot, d_nodes, sizeof(LBVHNode), cudaMemcpyDeviceToHost));
+        AABB_cw root = hostRoot.bbox;
+        std::cout << "Verification Root Bounds:\n";
+        std::cout << "  Min: " << root.min.x << ", " << root.min.y << ", " << root.min.z << "\n";
+        std::cout << "  Max: " << root.max.x << ", " << root.max.y << ", " << root.max.z << "\n";
     }
 
     // Get raw LBVH nodes for export
@@ -679,13 +769,17 @@ struct VizNode {
     int rightIdx;
 };
 
-void exportBVHToBinaryLBVH(const std::string& filename, const std::vector<LBVHNode>& nodes) {
+void exportBVHToBinary(const std::string& filename, const std::vector<LBVHNode>& nodes) {
     std::ofstream file(filename, std::ios::binary);
 
     std::vector<VizNode> exportNodes;
     exportNodes.reserve(nodes.size());
 
-    for(const auto& node : nodes) {
+    int numLeaves = (nodes.size() + 1) / 2;
+    int numInternal = nodes.size() - numLeaves;
+
+    for(size_t i = 0; i < nodes.size(); ++i) {
+        const auto& node = nodes[i];
         VizNode vn;
         vn.min[0] = node.bbox.min.x;
         vn.min[1] = node.bbox.min.y;
@@ -695,54 +789,24 @@ void exportBVHToBinaryLBVH(const std::string& filename, const std::vector<LBVHNo
         vn.max[1] = node.bbox.max.y;
         vn.max[2] = node.bbox.max.z;
 
-        vn.leftIdx = static_cast<int>(node.leftChild);
-        vn.rightIdx = static_cast<int>(node.rightChild);
+        // Check if this is a leaf node (high bit set in leftChild)
+        bool isLeaf = (node.leftChild & 0x80000000) != 0;
+
+        if (isLeaf) {
+            // Leaf node: mark with negative left index
+            vn.leftIdx = -1;
+            vn.rightIdx = -1;
+        } else {
+            // Internal node: store child indices
+            vn.leftIdx = static_cast<int>(node.leftChild);
+            vn.rightIdx = static_cast<int>(node.rightChild);
+        }
 
         exportNodes.push_back(vn);
     }
 
     file.write(reinterpret_cast<const char*>(exportNodes.data()), exportNodes.size() * sizeof(VizNode));
-    std::cout << "Exported " << exportNodes.size() << " nodes to " << filename
-              << " (" << (exportNodes.size() * sizeof(VizNode))/1024/1024 << " MB)\n";
-}
-
-// ------------------------------------------------------------------
-// OBJ Export for Visualization (LBVH version)
-// ------------------------------------------------------------------
-
-void exportLBVHToOBJ(const std::string& filename, const std::vector<LBVHNode>& nodes, bool leavesOnly) {
-    std::ofstream file(filename);
-    int v_offset = 1;
-
-    auto writeBox = [&](const AABB_cw& b) {
-        float x0 = b.min.x, y0 = b.min.y, z0 = b.min.z;
-        float x1 = b.max.x, y1 = b.max.y, z1 = b.max.z;
-
-        file << "v " << x0 << " " << y0 << " " << z0 << "\n";
-        file << "v " << x1 << " " << y0 << " " << z0 << "\n";
-        file << "v " << x1 << " " << y1 << " " << z0 << "\n";
-        file << "v " << x0 << " " << y1 << " " << z0 << "\n";
-        file << "v " << x0 << " " << y0 << " " << z1 << "\n";
-        file << "v " << x1 << " " << y0 << " " << z1 << "\n";
-        file << "v " << x1 << " " << y1 << " " << z1 << "\n";
-        file << "v " << x0 << " " << y1 << " " << z1 << "\n";
-
-        int o = v_offset;
-        file << "l " << o << " " << o+1 << " " << o+2 << " " << o+3 << " " << o << "\n";
-        file << "l " << o+4 << " " << o+5 << " " << o+6 << " " << o+7 << " " << o+4 << "\n";
-        file << "l " << o << " " << o+4 << "\n";
-        file << "l " << o+1 << " " << o+5 << "\n";
-        file << "l " << o+2 << " " << o+6 << "\n";
-        file << "l " << o+3 << " " << o+7 << "\n";
-        v_offset += 8;
-    };
-
-    int numLeafs = (nodes.size() + 1) / 2;
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        bool nodeIsLeaf = (i >= (nodes.size() + 1) / 2 - 1);
-        if (leavesOnly && !nodeIsLeaf) continue;
-        writeBox(nodes[i].bbox);
-    }
+    std::cout << "Exported " << exportNodes.size() << " nodes to " << filename << " (" << (exportNodes.size() * sizeof(VizNode))/1024/1024 << " MB)\n";
 }
 
 // ------------------------------------------------------------------
@@ -775,61 +839,34 @@ TriangleMesh generateRandomTriangles(int n) {
 int main(int argc, char* argv[]) {
     std::string inputFile;
     std::string outputFile;
-    int numTriangles = 10000000;  // Default: 10 million
+    int numTriangles = 10000000;
     bool leavesOnly = false;
     bool colabExport = false;
 
-    // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-
         if (arg == "-h" || arg == "--help") {
             printUsage(argv[0]);
             return 0;
         } else if (arg == "-i" || arg == "--input") {
-            if (i + 1 < argc) {
-                inputFile = argv[++i];
-            } else {
-                std::cerr << "Error: " << arg << " requires a file path\n";
-                return 1;
-            }
+            if (i + 1 < argc) inputFile = argv[++i];
         } else if (arg == "-o" || arg == "--output") {
-            if (i + 1 < argc) {
-                outputFile = argv[++i];
-            } else {
-                std::cerr << "Error: " << arg << " requires a file path\n";
-                return 1;
-            }
+            if (i + 1 < argc) outputFile = argv[++i];
         } else if (arg == "-n" || arg == "--triangles") {
-            if (i + 1 < argc) {
-                numTriangles = std::atoi(argv[++i]);
-                if (numTriangles <= 0) {
-                    std::cerr << "Error: Invalid triangle count\n";
-                    return 1;
-                }
-            } else {
-                std::cerr << "Error: " << arg << " requires a number\n";
-                return 1;
-            }
+            if (i + 1 < argc) numTriangles = std::atoi(argv[++i]);
         } else if (arg == "-l" || arg == "--leaves-only") {
             leavesOnly = true;
         } else if (arg == "-c" || arg == "--colab-export") {
             colabExport = true;
-        } else {
-            std::cerr << "Error: Unknown option: " << arg << "\n";
-            printUsage(argv[0]);
-            return 1;
         }
     }
 
-    // Load or generate mesh
     TriangleMesh mesh;
-
     if (!inputFile.empty()) {
         std::cout << "Loading OBJ file: " << inputFile << std::endl;
         try {
             mesh = loadOBJ(inputFile);
-            std::cout << "Loaded " << mesh.size() << " triangles from OBJ file\n";
+            std::cout << "Loaded " << mesh.size() << " triangles\n";
         } catch (const std::exception& e) {
             std::cerr << "Error loading OBJ: " << e.what() << std::endl;
             return 1;
@@ -839,10 +876,7 @@ int main(int argc, char* argv[]) {
         mesh = generateRandomTriangles(numTriangles);
     }
 
-    if (mesh.size() == 0) {
-        std::cerr << "Error: No triangles to process\n";
-        return 1;
-    }
+    if (mesh.size() == 0) return 1;
 
     LBVHBuilderCUDA builder;
 
@@ -858,7 +892,7 @@ int main(int argc, char* argv[]) {
     cudaEventRecord(start);
 
     // 2. Run Compute - TIMED
-    builder.runCompute();
+    builder.runCompute(mesh.size());
 
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -874,28 +908,15 @@ int main(int argc, char* argv[]) {
 
     builder.verify();
 
-    // Export BVH if output file specified
     if (!outputFile.empty()) {
         if (colabExport) {
             std::cout << "Exporting BVH to Colab binary format: " << outputFile << std::endl;
-            try {
-                std::vector<LBVHNode> nodes = builder.getRawNodes();
-                exportBVHToBinaryLBVH(outputFile, nodes);
-            } catch (const std::exception& e) {
-                std::cerr << "Error exporting BVH: " << e.what() << std::endl;
-                return 1;
-            }
+            std::vector<LBVHNode> nodes = builder.getRawNodes();
+            exportBVHToBinary(outputFile, nodes);
         } else {
             std::cout << "Exporting BVH to OBJ format: " << outputFile << std::endl;
-            try {
-                std::vector<LBVHNode> nodes = builder.getRawNodes();
-                exportLBVHToOBJ(outputFile, nodes, leavesOnly);
-                std::cout << "Exported " << nodes.size() << " BVH nodes"
-                          << (leavesOnly ? " (leaves only)" : "") << std::endl;
-            } catch (const std::exception& e) {
-                std::cerr << "Error exporting BVH: " << e.what() << std::endl;
-                return 1;
-            }
+            std::vector<BVHNode> bvhNodes = builder.getNodes();
+            exportBVHToOBJ(outputFile, bvhNodes, leavesOnly);
         }
     }
 
