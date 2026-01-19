@@ -167,9 +167,9 @@ int main(int argc, char** argv) {
     }
 
     // 3. Print table header
-    std::cout << "┌──────────────────┬─────────────────┬──────────────┬──────────────────────────┐\n";
-    std::cout << "│ Algorithm        │ Build Time (ms) │ SAH Cost     │ Throughput (MTris/s)     │\n";
-    std::cout << "├──────────────────┼─────────────────┼──────────────┼──────────────────────────┤\n";
+    std::cout << "┌──────────────────┬─────────────────────────────────────────────────────────┬──────────────┬──────────────────────────┐\n";
+    std::cout << "│ Algorithm        │ Build Time (ms)                                         │ SAH Cost     │ Throughput (MTris/s)     │\n";
+    std::cout << "├──────────────────┼─────────────────────────────────────────────────────────┼──────────────┼──────────────────────────┤\n";
 
     // 4. Unified Testing Loop
     for (auto& builder : builders) {
@@ -183,34 +183,34 @@ int main(int argc, char** argv) {
             float throughput = (mesh.size() / 1e6f) / (stats.buildTimeMs / 1000.0f);
             
             std::cout << "│ " << std::setw(16) << std::left << builder->getName() 
-                      << " │ " << std::setw(15) << std::right << std::fixed << std::setprecision(3) << stats.buildTimeMs 
+                      << " │ " << std::setw(57) << std::right << std::fixed << std::setprecision(3) << stats.buildTimeMs 
                       << " │ " << std::setw(12) << std::fixed << std::setprecision(2) << stats.sahCost 
                       << " │ " << std::setw(24) << std::fixed << std::setprecision(2) << throughput << " │\n";
             
             // Print detailed timing breakdown if available
             std::string breakdown = builder->getTimingBreakdown();
             if (!breakdown.empty()) {
-                std::cout << "│                  │ Breakdown:      │              │                          │\n";
+                std::cout << "│                  │ Breakdown:                                               │              │                          │\n";
                 std::istringstream iss(breakdown);
                 std::string line;
                 while (std::getline(iss, line)) {
-                    std::cout << "│                  │ " << std::setw(15) << std::left << line;
+                    std::cout << "│                  │ " << std::setw(57) << std::left << line;
                     // Pad to complete the row
-                    int padding = 15 - line.length();
+                    int padding = 57 - line.length();
                     for (int i = 0; i < padding; ++i) std::cout << " ";
                     std::cout << " │              │                          │\n";
                 }
             }
             
-            std::cout << "├──────────────────┼─────────────────┼──────────────┼──────────────────────────┤\n";
+            std::cout << "├──────────────────┼─────────────────────────────────────────────────────────┼──────────────┼──────────────────────────┤\n";
             
         } catch (const std::exception& e) {
             std::cerr << "Error evaluating " << builder->getName() << ": " << e.what() << "\n";
-            std::cout << "├──────────────────┼─────────────────┼──────────────┼──────────────────────────┤\n";
+            std::cout << "├──────────────────┼─────────────────────────────────────────────────────────┼──────────────┼──────────────────────────┤\n";
         }
     }
     
-    std::cout << "└──────────────────┴─────────────────┴──────────────┴──────────────────────────┘\n\n";
+    std::cout << "└──────────────────┴─────────────────────────────────────────────────────────┴──────────────┴──────────────────────────┘\n\n";
 
     // 4. Export BVH if requested
     if (!outputFile.empty() && !builders.empty()) {

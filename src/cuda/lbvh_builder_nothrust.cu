@@ -102,31 +102,67 @@ __global__ void kReduceBounds_Step1_nt(const AABB_cw* input, AABB_cw* output, in
 }
 
 __global__ void kReduceBounds_Step2_nt(AABB_cw* data, int n) {
-    __shared__ AABB_cw sdata[256];
+    __shared__ float sdata_min_x[256];
+    __shared__ float sdata_min_y[256];
+    __shared__ float sdata_min_z[256];
+    __shared__ float sdata_max_x[256];
+    __shared__ float sdata_max_y[256];
+    __shared__ float sdata_max_z[256];
+
     int tid = threadIdx.x;
 
-    if (tid < n) {
-        sdata[tid] = data[tid];
-    } else {
-        sdata[tid].min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
-        sdata[tid].max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    // 1. Initialize local registers to opposite infinity
+    float local_min_x = FLT_MAX;
+    float local_min_y = FLT_MAX;
+    float local_min_z = FLT_MAX;
+    float local_max_x = -FLT_MAX;
+    float local_max_y = -FLT_MAX;
+    float local_max_z = -FLT_MAX;
+
+    // 2. Loop over the input array (stride by blockDim.x)
+    // This ensures we process ALL blocks from Step 1, not just the first 256.
+    int i = tid;
+    while (i < n) {
+        local_min_x = fminf(local_min_x, data[i].min.x);
+        local_min_y = fminf(local_min_y, data[i].min.y);
+        local_min_z = fminf(local_min_z, data[i].min.z);
+        local_max_x = fmaxf(local_max_x, data[i].max.x);
+        local_max_y = fmaxf(local_max_y, data[i].max.y);
+        local_max_z = fmaxf(local_max_z, data[i].max.z);
+        i += blockDim.x;
     }
+
+    // 3. Store accumulated local result into shared memory
+    sdata_min_x[tid] = local_min_x;
+    sdata_min_y[tid] = local_min_y;
+    sdata_min_z[tid] = local_min_z;
+    sdata_max_x[tid] = local_max_x;
+    sdata_max_y[tid] = local_max_y;
+    sdata_max_z[tid] = local_max_z;
+    
     __syncthreads();
 
+    // 4. Standard Block Reduction (256 -> 1)
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s && tid + s < n) {
-            sdata[tid].min.x = fminf(sdata[tid].min.x, sdata[tid + s].min.x);
-            sdata[tid].min.y = fminf(sdata[tid].min.y, sdata[tid + s].min.y);
-            sdata[tid].min.z = fminf(sdata[tid].min.z, sdata[tid + s].min.z);
-            sdata[tid].max.x = fmaxf(sdata[tid].max.x, sdata[tid + s].max.x);
-            sdata[tid].max.y = fmaxf(sdata[tid].max.y, sdata[tid + s].max.y);
-            sdata[tid].max.z = fmaxf(sdata[tid].max.z, sdata[tid + s].max.z);
+        if (tid < s) {
+            sdata_min_x[tid] = fminf(sdata_min_x[tid], sdata_min_x[tid + s]);
+            sdata_min_y[tid] = fminf(sdata_min_y[tid], sdata_min_y[tid + s]);
+            sdata_min_z[tid] = fminf(sdata_min_z[tid], sdata_min_z[tid + s]);
+            sdata_max_x[tid] = fmaxf(sdata_max_x[tid], sdata_max_x[tid + s]);
+            sdata_max_y[tid] = fmaxf(sdata_max_y[tid], sdata_max_y[tid + s]);
+            sdata_max_z[tid] = fmaxf(sdata_max_z[tid], sdata_max_z[tid + s]);
         }
         __syncthreads();
     }
 
+    // 5. Write final result to index 0
     if (tid == 0) {
-        data[0] = sdata[0];
+        data[0].min.x = sdata_min_x[0];
+        data[0].min.y = sdata_min_y[0];
+        data[0].min.z = sdata_min_z[0];
+        data[0].max.x = sdata_max_x[0];
+        data[0].max.y = sdata_max_y[0];
+        data[0].max.z = sdata_max_z[0];
     }
 }
 
@@ -214,6 +250,11 @@ __global__ void kRefitHierarchy_nt(LBVHNodeNoThrust* nodes, int* atomicCounters,
 
     while (idx != 0) {
         uint32_t parent = nodes[idx].parent;
+        
+        // Ensure all writes to global memory (nodes[idx].bbox) are visible 
+        // to other threads before we increment the flag.
+        __threadfence();
+        
         int oldVal = atomicAdd(&atomicCounters[parent], 1);
         if (oldVal == 0) return;
 
