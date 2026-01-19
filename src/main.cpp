@@ -183,20 +183,20 @@ int main(int argc, char** argv) {
             float throughput = (mesh.size() / 1e6f) / (stats.buildTimeMs / 1000.0f);
             
             std::cout << "│ " << std::setw(16) << std::left << builder->getName() 
-                      << " │ " << std::setw(57) << std::right << std::fixed << std::setprecision(3) << stats.buildTimeMs 
+                      << " │ " << std::setw(55) << std::right << std::fixed << std::setprecision(3) << stats.buildTimeMs 
                       << " │ " << std::setw(12) << std::fixed << std::setprecision(2) << stats.sahCost 
                       << " │ " << std::setw(24) << std::fixed << std::setprecision(2) << throughput << " │\n";
             
             // Print detailed timing breakdown if available
             std::string breakdown = builder->getTimingBreakdown();
             if (!breakdown.empty()) {
-                std::cout << "│                  │ Breakdown:                                               │              │                          │\n";
+                std::cout << "│                  │ Breakdown:                                              │              │                          │\n";
                 std::istringstream iss(breakdown);
                 std::string line;
                 while (std::getline(iss, line)) {
-                    std::cout << "│                  │ " << std::setw(57) << std::left << line;
-                    // Pad to complete the row
-                    int padding = 57 - line.length();
+                    std::cout << "│                  │ " << line;
+                    // Pad to complete the row (column width is 55)
+                    int padding = 55 - static_cast<int>(line.length());
                     for (int i = 0; i < padding; ++i) std::cout << " ";
                     std::cout << " │              │                          │\n";
                 }
