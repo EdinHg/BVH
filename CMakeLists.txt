@@ -15,6 +15,7 @@ set(SOURCES
     src/evaluator.cpp
     src/cuda/lbvh_builder.cu
     src/cuda/lbvh_builder_nothrust.cu
+    src/cuda/ploc_builder.cu
 )
 
 set_source_files_properties(

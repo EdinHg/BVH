@@ -3,7 +3,7 @@
 #include "../include/mesh.h"
 #include "cuda/lbvh_builder.cuh"
 #include "cuda/lbvh_builder_nothrust.cuh"
-// #include "cuda/ploc_builder.cuh"  // Uncomment when implemented
+#include "cuda/ploc_builder.cuh"
 
 #include <iostream>
 #include <iomanip>
@@ -88,10 +88,11 @@ void printUsage(const char* programName) {
     std::cout << "Options:\n";
     std::cout << "  -i, --input <file>        Load OBJ file\n";
     std::cout << "  -n, --triangles <count>   Generate N random triangles (default: 1000000)\n";
-    std::cout << "  -a, --algorithm <name>    Run specific algorithm (lbvh, lbvh-nothrust, all)\n";
+    std::cout << "  -a, --algorithm <name>    Run specific algorithm (lbvh, lbvh-nothrust, ploc, all)\n";
     std::cout << "  -o, --output <file>       Export BVH to file\n";
     std::cout << "  -c, --colab-export        Export as binary (for Colab visualization)\n";
     std::cout << "  -l, --leaves-only         Export only leaf bounding boxes\n";
+    std::cout << "  -r, --radius <value>      Set search radius for PLOC (default: 25)\n";
     std::cout << "  -h, --help                Show this help\n\n";
     std::cout << "Example:\n";
     std::cout << "  " << programName << " -i bunny.obj\n";
@@ -105,6 +106,7 @@ int main(int argc, char** argv) {
     std::string outputFile;
     bool colabExport = false;
     bool leavesOnly = false;
+    int radius = 0; // 0 means default/not set
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -123,6 +125,9 @@ int main(int argc, char** argv) {
         }
         else if (arg == "-l" || arg == "--leaves-only") {
             leavesOnly = true;
+        }
+        else if ((arg == "-r" || arg == "--radius") && i + 1 < argc) {
+            radius = std::stoi(argv[++i]);
         }
     }
 
@@ -152,7 +157,9 @@ int main(int argc, char** argv) {
     if (selectedAlgo == "all") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
         builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
-        // builders.push_back(std::make_unique<PLOCBuilderCUDA>()); // Uncomment when implemented
+        builders.push_back(std::make_unique<PLOCBuilderCUDA>(10));
+        builders.push_back(std::make_unique<PLOCBuilderCUDA>(25));
+        builders.push_back(std::make_unique<PLOCBuilderCUDA>(100));
     }
     else if (selectedAlgo == "lbvh") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
@@ -160,9 +167,21 @@ int main(int argc, char** argv) {
     else if (selectedAlgo == "lbvh-nothrust") {
         builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
     }
+    else if (selectedAlgo == "ploc") {
+        if (radius > 0) {
+            builders.push_back(std::make_unique<PLOCBuilderCUDA>(radius));
+        } else {
+             // If manual run without radius, simulate benchmark mode or default? 
+             // "utilize 3 different values... during benchmark"
+             // I'll add all 3 for consistency if no radius is specified, so user sees the comparison.
+            builders.push_back(std::make_unique<PLOCBuilderCUDA>(10));
+            builders.push_back(std::make_unique<PLOCBuilderCUDA>(25));
+            builders.push_back(std::make_unique<PLOCBuilderCUDA>(100));
+        }
+    }
     else {
         std::cerr << "Unknown algorithm: " << selectedAlgo << "\n";
-        std::cerr << "Available: lbvh, lbvh-nothrust, all\n";
+        std::cerr << "Available: lbvh, lbvh-nothrust, ploc, all\n";
         return 1;
     }
 
@@ -214,8 +233,19 @@ int main(int argc, char** argv) {
 
     // 4. Export BVH if requested
     if (!outputFile.empty() && !builders.empty()) {
-        std::cout << "Exporting BVH from " << builders[0]->getName() << "...\n";
-        const auto& nodes = builders[0]->getNodes();
+        // Default to the first builder
+        BVHBuilder* exporter = builders[0].get();
+
+        // Try to find PLOC r=25 specifically as requested
+        for (auto& b : builders) {
+            if (b->getName() == "PLOC CUDA (r=25)") {
+                exporter = b.get();
+                break;
+            }
+        }
+
+        std::cout << "Exporting BVH from " << exporter->getName() << "...\n";
+        const auto& nodes = exporter->getNodes();
         
         if (colabExport) {
             std::cout << "Exporting to binary format: " << outputFile << "\n";
