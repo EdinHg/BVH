@@ -92,6 +92,7 @@ void printUsage(const char* programName) {
     std::cout << "  -o, --output <file>       Export BVH to file\n";
     std::cout << "  -c, --colab-export        Export as binary (for Colab visualization)\n";
     std::cout << "  -l, --leaves-only         Export only leaf bounding boxes\n";
+    std::cout << "  -r, --radius <value>      Set search radius for PLOC (default: 25)\n";
     std::cout << "  -h, --help                Show this help\n\n";
     std::cout << "Example:\n";
     std::cout << "  " << programName << " -i bunny.obj\n";
@@ -105,6 +106,7 @@ int main(int argc, char** argv) {
     std::string outputFile;
     bool colabExport = false;
     bool leavesOnly = false;
+    int radius = 0; // 0 means default/not set
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -123,6 +125,9 @@ int main(int argc, char** argv) {
         }
         else if (arg == "-l" || arg == "--leaves-only") {
             leavesOnly = true;
+        }
+        else if ((arg == "-r" || arg == "--radius") && i + 1 < argc) {
+            radius = std::stoi(argv[++i]);
         }
     }
 
@@ -152,7 +157,9 @@ int main(int argc, char** argv) {
     if (selectedAlgo == "all") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
         builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
-        builders.push_back(std::make_unique<PLOCBuilderCUDA>());
+        builders.push_back(std::make_unique<PLOCBuilderCUDA>(10));
+        builders.push_back(std::make_unique<PLOCBuilderCUDA>(25));
+        builders.push_back(std::make_unique<PLOCBuilderCUDA>(100));
     }
     else if (selectedAlgo == "lbvh") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
@@ -161,7 +168,16 @@ int main(int argc, char** argv) {
         builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
     }
     else if (selectedAlgo == "ploc") {
-        builders.push_back(std::make_unique<PLOCBuilderCUDA>());
+        if (radius > 0) {
+            builders.push_back(std::make_unique<PLOCBuilderCUDA>(radius));
+        } else {
+             // If manual run without radius, simulate benchmark mode or default? 
+             // "utilize 3 different values... during benchmark"
+             // I'll add all 3 for consistency if no radius is specified, so user sees the comparison.
+            builders.push_back(std::make_unique<PLOCBuilderCUDA>(10));
+            builders.push_back(std::make_unique<PLOCBuilderCUDA>(25));
+            builders.push_back(std::make_unique<PLOCBuilderCUDA>(100));
+        }
     }
     else {
         std::cerr << "Unknown algorithm: " << selectedAlgo << "\n";

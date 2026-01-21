@@ -3,6 +3,8 @@
 #include <thrust/device_ptr.h>
 #include <cub/cub.cuh>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 
 // --- Device Helpers ---
 
@@ -85,13 +87,7 @@ __global__ void kReduceBounds_Step2_ploc(AABB_cw* data, int n) {
     int tid = threadIdx.x;
     int i = tid;
 
-    // Use first thread to init shared memory? No, load from global
-    // But we might have more than 256 items if grid was large.
-    // Assuming Step 1 reduces enough to fit in one block for Step 2 (max grid size 65535 -> 256 threads handles up to 256*256 items?)
-    // Actually typically we just launch 1 block.
-    
     AABB_cw local; // Init with empty
-    // Actually better to just load all 'n' elements into shared memory reduction
     
     if (tid < n) local = data[tid]; 
     else {
@@ -101,8 +97,6 @@ __global__ void kReduceBounds_Step2_ploc(AABB_cw* data, int n) {
     
     sdata[tid] = local;
     
-    // Handle if n > blockDim.x? Simple recursive reduction assumption: N <= 256*256
-    // If n > 256, we loop.
     i += blockDim.x;
     while (i < n) {
         sdata[tid] = sdata[tid].merge(data[i]);
@@ -300,7 +294,8 @@ __global__ void kCompactAABBs(
 
 // --- Implementation ---
 
-PLOCBuilderCUDA::PLOCBuilderCUDA() : 
+PLOCBuilderCUDA::PLOCBuilderCUDA(int r) : 
+    radius(r),
     d_v0x(nullptr), d_v0y(nullptr), d_v0z(nullptr),
     d_v1x(nullptr), d_v1y(nullptr), d_v1z(nullptr),
     d_v2x(nullptr), d_v2y(nullptr), d_v2z(nullptr),
@@ -312,7 +307,8 @@ PLOCBuilderCUDA::PLOCBuilderCUDA() :
     d_nodes(nullptr), d_next_node_idx(nullptr),
     d_cluster_aabbs_swap(nullptr), d_cluster_indices_swap(nullptr),
     d_temp_storage(nullptr), temp_storage_bytes(0),
-    lastBuildTimeMs(0.0f) 
+    lastBuildTimeMs(0.0f),
+    time_init(0.0f), time_search(0.0f), time_merge(0.0f), time_compact(0.0f)
 {}
 
 PLOCBuilderCUDA::~PLOCBuilderCUDA() {
@@ -379,7 +375,7 @@ void PLOCBuilderCUDA::allocate(size_t n) {
 }
 
 std::string PLOCBuilderCUDA::getName() const { 
-    return "PLOC CUDA"; 
+    return "PLOC CUDA (r=" + std::to_string(radius) + ")"; 
 }
 
 const std::vector<BVHNode>& PLOCBuilderCUDA::getNodes() const { 
@@ -394,15 +390,35 @@ float PLOCBuilderCUDA::getLastBuildTimeMS() const {
     return lastBuildTimeMs; 
 }
 
+std::string PLOCBuilderCUDA::getTimingBreakdown() const {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3);
+    oss << "  Initialization:   " << time_init << " ms\n";
+    oss << "  NN Search (Red):  " << time_search << " ms\n";
+    oss << "  Merging (Green):  " << time_merge << " ms\n";
+    oss << "  Compaction (Mag): " << time_compact << " ms";
+    return oss.str();
+}
+
 void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
     int n = mesh.size();
     if (n == 0) return;
 
     allocate(n);
+    
+    // Reset timings
+    time_init = 0;
+    time_search = 0;
+    time_merge = 0;
+    time_compact = 0;
+    
+    float temp_ms = 0;
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
+
+    // --- INITIALIZATION PHASE ---
     cudaEventRecord(start);
 
     // 1. Upload Data
@@ -445,7 +461,6 @@ void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
     thrust::sort_by_key(t_morton, t_morton + n, t_indices);
     
     // Reorder AABBs to match sorted indices using custom Gather
-    // Using d_cluster_aabbs as destination for sorted AABBs
     kGatherAABBs<<<gridSize, blockSize>>>(d_indices, d_triBBoxes, d_cluster_aabbs, n);
 
     // Initialize PLOC Loop Data
@@ -457,18 +472,25 @@ void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
     // Reset next node index
     int initial_cnt = n;
     cudaMemcpy(d_next_node_idx, &initial_cnt, sizeof(int), cudaMemcpyHostToDevice);
-
-    int current_n = n;
-    int radius = 25;
-
+    
     // Allocate temp storage for CUB if needed
-    // Look up requirements
+    // Look up requirements (using dummy call, doesn't execute on GPU but computes size)
     cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes, d_valid, d_scan_offsets, n);
     cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&temp_ms, start, stop);
+    time_init = temp_ms;
+
+    int current_n = n;
+    int radius = this->radius;
 
     while (current_n > 1) {
         int num_blocks = (current_n + blockSize - 1) / blockSize;
 
+        // --- PHASE 1: SEARCH ---
+        cudaEventRecord(start);
         kFindNearestNeighbors_ploc<<<num_blocks, blockSize>>>(
             d_cluster_aabbs,
             current_n,
@@ -476,7 +498,13 @@ void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
             d_neighbors,
             d_dists
         );
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&temp_ms, start, stop);
+        time_search += temp_ms;
 
+        // --- PHASE 2: MERGE ---
+        cudaEventRecord(start);
         kMergeClusters_ploc<<<num_blocks, blockSize>>>(
             d_neighbors,
             d_dists,
@@ -487,12 +515,17 @@ void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
             d_next_node_idx,
             d_valid
         );
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&temp_ms, start, stop);
+        time_merge += temp_ms; // Accumulate merging time
 
-        // Compaction
+        // --- PHASE 3: COMPACTION ---
+        cudaEventRecord(start);
         // 1. Scan valid flags
         cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes, d_valid, d_scan_offsets, current_n);
 
-        // 2. Get new count (last offset + last valid)
+        // 2. Get new count
         int last_valid, last_offset;
         cudaMemcpy(&last_valid, d_valid + current_n - 1, sizeof(int), cudaMemcpyDeviceToHost);
         cudaMemcpy(&last_offset, d_scan_offsets + current_n - 1, sizeof(int), cudaMemcpyDeviceToHost);
@@ -506,12 +539,17 @@ void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
         std::swap(d_cluster_indices, d_cluster_indices_swap);
         std::swap(d_cluster_aabbs, d_cluster_aabbs_swap);
         
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&temp_ms, start, stop);
+        time_compact += temp_ms;
+
         current_n = new_n;
     }
-
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&lastBuildTimeMs, start, stop);
+    
+    // Calculate total purely based on accumulated + init?
+    // Or simpler: Total = init + search + merge + compact
+    lastBuildTimeMs = time_init + time_search + time_merge + time_compact;
 
     int num_allocated_nodes;
     cudaMemcpy(&num_allocated_nodes, d_next_node_idx, sizeof(int), cudaMemcpyDeviceToHost);

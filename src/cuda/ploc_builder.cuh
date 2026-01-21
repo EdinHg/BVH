@@ -40,12 +40,20 @@ private:
     // Temp storage for CUB DeviceScan
     void* d_temp_storage;
     size_t temp_storage_bytes;
+    
+    // Timing breakdown
+    float time_init;
+    float time_search;
+    float time_merge;
+    float time_compact;
 
     void cleanup();
     void allocate(size_t n);
 
+    int radius;
+
 public:
-    PLOCBuilderCUDA();
+    PLOCBuilderCUDA(int r = 25);
     ~PLOCBuilderCUDA();
 
     std::string getName() const override;
@@ -53,4 +61,5 @@ public:
     const std::vector<BVHNode>& getNodes() const override;
     const std::vector<uint32_t>& getIndices() const override;
     float getLastBuildTimeMS() const override;
+    std::string getTimingBreakdown() const override;
 };
