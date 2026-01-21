@@ -3,7 +3,7 @@
 #include "../include/mesh.h"
 #include "cuda/lbvh_builder.cuh"
 #include "cuda/lbvh_builder_nothrust.cuh"
-// #include "cuda/ploc_builder.cuh"  // Uncomment when implemented
+#include "cuda/ploc_builder.cuh"
 
 #include <iostream>
 #include <iomanip>
@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
     if (selectedAlgo == "all") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
         builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
-        // builders.push_back(std::make_unique<PLOCBuilderCUDA>()); // Uncomment when implemented
+        builders.push_back(std::make_unique<PLOCBuilderCUDA>());
     }
     else if (selectedAlgo == "lbvh") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
