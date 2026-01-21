@@ -233,8 +233,19 @@ int main(int argc, char** argv) {
 
     // 4. Export BVH if requested
     if (!outputFile.empty() && !builders.empty()) {
-        std::cout << "Exporting BVH from " << builders[0]->getName() << "...\n";
-        const auto& nodes = builders[0]->getNodes();
+        // Default to the first builder
+        BVHBuilder* exporter = builders[0].get();
+
+        // Try to find PLOC r=25 specifically as requested
+        for (auto& b : builders) {
+            if (b->getName() == "PLOC CUDA (r=25)") {
+                exporter = b.get();
+                break;
+            }
+        }
+
+        std::cout << "Exporting BVH from " << exporter->getName() << "...\n";
+        const auto& nodes = exporter->getNodes();
         
         if (colabExport) {
             std::cout << "Exporting to binary format: " << outputFile << "\n";
