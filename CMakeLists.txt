@@ -14,6 +14,7 @@ set(SOURCES
     src/loader.cpp
     src/evaluator.cpp
     src/cuda/lbvh_builder.cu
+    src/cuda/lbvh_plus_builder.cu
     src/cuda/lbvh_builder_nothrust.cu
     src/cuda/ploc_builder.cu
 )

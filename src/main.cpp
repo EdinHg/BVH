@@ -2,6 +2,7 @@
 #include "../include/evaluator.h"
 #include "../include/mesh.h"
 #include "cuda/lbvh_builder.cuh"
+#include "cuda/lbvh_plus_builder.cuh"
 #include "cuda/lbvh_builder_nothrust.cuh"
 #include "cuda/ploc_builder.cuh"
 
@@ -156,6 +157,7 @@ int main(int argc, char** argv) {
     
     if (selectedAlgo == "all") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
+        builders.push_back(std::make_unique<LBVHPlusBuilderCUDA>());
         builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
         builders.push_back(std::make_unique<PLOCBuilderCUDA>(10));
         builders.push_back(std::make_unique<PLOCBuilderCUDA>(25));
@@ -163,6 +165,9 @@ int main(int argc, char** argv) {
     }
     else if (selectedAlgo == "lbvh") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
+    }
+    else if (selectedAlgo == "lbvh+") {
+        builders.push_back(std::make_unique<LBVHPlusBuilderCUDA>());
     }
     else if (selectedAlgo == "lbvh-nothrust") {
         builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
@@ -181,7 +186,7 @@ int main(int argc, char** argv) {
     }
     else {
         std::cerr << "Unknown algorithm: " << selectedAlgo << "\n";
-        std::cerr << "Available: lbvh, lbvh-nothrust, ploc, all\n";
+        std::cerr << "Available: lbvh, lbvh+, lbvh-nothrust, ploc, all\n";
         return 1;
     }
 
