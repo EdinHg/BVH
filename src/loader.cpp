@@ -40,7 +40,14 @@ TriangleMesh loadOBJ(const std::string& filename) {
                 ss >> token;
                 size_t slash = token.find('/');
                 std::string indexStr = (slash != std::string::npos) ? token.substr(0, slash) : token;
-                indices[i] = std::stoi(indexStr) - 1; // OBJ indices are 1-based
+                
+                int rawIndex = std::stoi(indexStr);
+
+                if (rawIndex < 0) {
+                    indices[i] = (int)vertices.size() + rawIndex;
+                } else {
+                    indices[i] = rawIndex - 1;
+                }
             }
             
             // Validate indices
