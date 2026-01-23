@@ -1,8 +1,7 @@
 #include "lbvh_builder_nothrust.cuh"
+#include "radix_sort_kv.cuh"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
-#include <thrust/sort.h>
-#include <thrust/device_vector.h>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -394,10 +393,8 @@ void LBVHBuilderNoThrust::runCompute(int n) {
 
     cudaEventRecord(e_morton);
 
-    // 4. Sort
-    thrust::device_ptr<uint32_t> mortonPtr(d_mortonCodes);
-    thrust::device_ptr<uint32_t> indicesPtr(d_indices);
-    thrust::sort_by_key(mortonPtr, mortonPtr + n, indicesPtr);
+    // 4. Sort (Custom Radix Sort)
+    radixSortKeyValue30bit(d_mortonCodes, d_indices, n);
 
     cudaEventRecord(e_sort);
 

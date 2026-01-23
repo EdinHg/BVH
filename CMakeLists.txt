@@ -15,6 +15,7 @@ set(SOURCES
     src/evaluator.cpp
     src/cuda/lbvh_builder.cu
     src/cuda/lbvh_builder_nothrust.cu
+    src/cuda/radix_sort_kv.cu
     src/cuda/ploc_builder.cu
 )
 
