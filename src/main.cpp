@@ -1,6 +1,7 @@
 #include "../include/bvh_builder.h"
 #include "../include/evaluator.h"
 #include "../include/mesh.h"
+#include "../include/render_engine.h"
 #include "cuda/lbvh_builder.cuh"
 #include "cuda/lbvh_builder_nothrust.cuh"
 #include "cuda/ploc_builder.cuh"
@@ -12,6 +13,8 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <algorithm>
+#include <cctype>
 
 // Forward declarations from loader.cpp
 TriangleMesh loadMesh(int argc, char** argv);
@@ -82,6 +85,21 @@ void exportBVHToOBJ(const std::string& filename, const std::vector<BVHNode>& nod
     }
 }
 
+// Sanitize algorithm name for use as a filename component
+static std::string sanitizeName(const std::string& name) {
+    std::string result;
+    for (char c : name) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') {
+            result += c;
+        } else if (c == ' ' || c == '(' || c == ')' || c == '=') {
+            result += '_';
+        }
+    }
+    // Remove trailing underscores
+    while (!result.empty() && result.back() == '_') result.pop_back();
+    return result;
+}
+
 void printUsage(const char* programName) {
     std::cout << "BVH Construction Algorithm Comparison Tool\n\n";
     std::cout << "Usage: " << programName << " [options]\n\n";
@@ -94,10 +112,19 @@ void printUsage(const char* programName) {
     std::cout << "  -l, --leaves-only         Export only leaf bounding boxes\n";
     std::cout << "  -r, --radius <value>      Set search radius for PLOC (default: 25)\n";
     std::cout << "  -h, --help                Show this help\n\n";
-    std::cout << "Example:\n";
+    std::cout << "Render options:\n";
+    std::cout << "  --render <prefix>         Render each BVH to <prefix>_<algo>.ppm\n";
+    std::cout << "  --render-size <WxH>       Render resolution (default: 1024x768)\n";
+    std::cout << "  --shading <mode>          normal|depth|diffuse|heatmap (default: normal)\n";
+    std::cout << "  --camera <ex,ey,ez,lx,ly,lz>  Camera eye + look-at (default: auto-fit)\n";
+    std::cout << "  --camera-up <ux,uy,uz>    Camera up vector (default: 0,1,0)\n";
+    std::cout << "  --fov <degrees>           Vertical FOV (default: 60)\n\n";
+    std::cout << "Examples:\n";
     std::cout << "  " << programName << " -i bunny.obj\n";
     std::cout << "  " << programName << " -n 10000000 -a lbvh\n";
     std::cout << "  " << programName << " -n 1000000 -o bvh.bin -c\n";
+    std::cout << "  " << programName << " -i bunny.obj --render output --shading heatmap\n";
+    std::cout << "  " << programName << " -i bunny.obj --render img --camera 0,1,3,0,0,0 --fov 45\n";
 }
 
 int main(int argc, char** argv) {
@@ -107,6 +134,14 @@ int main(int argc, char** argv) {
     bool colabExport = false;
     bool leavesOnly = false;
     int radius = 0; // 0 means default/not set
+
+    // Render options
+    std::string renderPrefix;
+    int renderWidth = 1024, renderHeight = 768;
+    std::string shadingStr = "normal";
+    std::string cameraStr;
+    std::string cameraUpStr;
+    float fov = 0.0f; // 0 means use default (60)
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -128,6 +163,33 @@ int main(int argc, char** argv) {
         }
         else if ((arg == "-r" || arg == "--radius") && i + 1 < argc) {
             radius = std::stoi(argv[++i]);
+        }
+        else if (arg == "--render" && i + 1 < argc) {
+            renderPrefix = argv[++i];
+        }
+        else if (arg == "--render-size" && i + 1 < argc) {
+            std::string sizeStr = argv[++i];
+            // Parse WxH format
+            size_t xpos = sizeStr.find('x');
+            if (xpos == std::string::npos) xpos = sizeStr.find('X');
+            if (xpos != std::string::npos) {
+                renderWidth  = std::stoi(sizeStr.substr(0, xpos));
+                renderHeight = std::stoi(sizeStr.substr(xpos + 1));
+            } else {
+                std::cerr << "Warning: --render-size expects WxH format. Using default.\n";
+            }
+        }
+        else if (arg == "--shading" && i + 1 < argc) {
+            shadingStr = argv[++i];
+        }
+        else if (arg == "--camera" && i + 1 < argc) {
+            cameraStr = argv[++i];
+        }
+        else if (arg == "--camera-up" && i + 1 < argc) {
+            cameraUpStr = argv[++i];
+        }
+        else if (arg == "--fov" && i + 1 < argc) {
+            fov = std::stof(argv[++i]);
         }
     }
 
@@ -257,7 +319,55 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 5. Print detailed statistics for each algorithm
+    // 5. Render images if requested
+    if (!renderPrefix.empty() && !builders.empty()) {
+        std::cout << "\n========================================\n";
+        std::cout << "  Rendering\n";
+        std::cout << "========================================\n";
+
+        ShadingMode shadingMode = parseShadingMode(shadingStr);
+
+        // Use the first builder's BVH for auto-camera computation
+        Camera camera = parseCameraString(cameraStr, cameraUpStr, fov,
+                                          builders[0]->getNodes());
+
+        std::cout << "Camera: eye=("
+                  << camera.eye.x << ", " << camera.eye.y << ", " << camera.eye.z
+                  << ") lookAt=("
+                  << camera.lookAt.x << ", " << camera.lookAt.y << ", " << camera.lookAt.z
+                  << ") fov=" << camera.fovY << "\n";
+        std::cout << "Shading: " << shadingStr << "  Resolution: "
+                  << renderWidth << "x" << renderHeight << "\n\n";
+
+        for (auto& builder : builders) {
+            try {
+                const auto& nodes = builder->getNodes();
+                if (nodes.empty()) {
+                    std::cerr << "Skipping render for " << builder->getName()
+                              << ": no BVH nodes\n";
+                    continue;
+                }
+
+                std::string sanitized = sanitizeName(builder->getName());
+                std::string outFile = renderPrefix + "_" + sanitized + ".ppm";
+
+                RenderStats rStats = renderImage(
+                    nodes, mesh,
+                    renderWidth, renderHeight,
+                    camera, shadingMode, outFile
+                );
+
+                printRenderStats(builder->getName(), rStats);
+                std::cout << "\n";
+
+            } catch (const std::exception& e) {
+                std::cerr << "Error rendering " << builder->getName()
+                          << ": " << e.what() << "\n";
+            }
+        }
+    }
+
+    // 6. Print detailed statistics for each algorithm
     std::cout << "========================================\n";
     std::cout << "  Detailed Statistics\n";
     std::cout << "========================================\n";
