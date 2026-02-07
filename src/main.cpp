@@ -331,6 +331,23 @@ int main(int argc, char** argv) {
         Camera camera = parseCameraString(cameraStr, cameraUpStr, fov,
                                           builders[0]->getNodes());
 
+        // ---- NEW: Compute global heatmap max if using heatmap mode ----
+        float globalHeatmapMax = 0.0f;
+        if (shadingMode == ShadingMode::HEATMAP) {
+            std::cout << "Pre-rendering to compute global heatmap normalization...\n";
+            for (auto& builder : builders) {
+                const auto& nodes = builder->getNodes();
+                if (nodes.empty()) continue;
+
+                RenderStats preStats = renderImage(
+                    nodes, mesh, renderWidth, renderHeight,
+                    camera, shadingMode, "", 0.0f // Empty output, auto-normalize
+                );
+                globalHeatmapMax = std::max(globalHeatmapMax, preStats.maxNodesVisited);
+            }
+            std::cout << "Global heatmap max (p99): " << globalHeatmapMax << "\n\n";
+        }
+
         std::cout << "Camera: eye=("
                   << camera.eye.x << ", " << camera.eye.y << ", " << camera.eye.z
                   << ") lookAt=("
@@ -354,7 +371,8 @@ int main(int argc, char** argv) {
                 RenderStats rStats = renderImage(
                     nodes, mesh,
                     renderWidth, renderHeight,
-                    camera, shadingMode, outFile
+                    camera, shadingMode, outFile,
+                    globalHeatmapMax  // ← Use fixed max
                 );
 
                 printRenderStats(builder->getName(), rStats);

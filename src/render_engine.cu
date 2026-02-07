@@ -172,7 +172,8 @@ __device__ bool intersectTriangle(const Ray& ray,
 
     // Barycentric u
     float u = (tx * px + ty * py + tz * pz) * inv_det;
-    if (u < 0.0f || u > 1.0f) return false;
+    // if (u < 0.0f || u > 1.0f) return false;
+    if (u < -1e-5f || u > 1.00001f) return false;
 
     // Q = T x e1
     float qx = ty * e1z - tz * e1y;
@@ -181,7 +182,8 @@ __device__ bool intersectTriangle(const Ray& ray,
 
     // Barycentric v
     float v = (ray.direction.x * qx + ray.direction.y * qy + ray.direction.z * qz) * inv_det;
-    if (v < 0.0f || u + v > 1.0f) return false;
+    // if (v < 0.0f || u + v > 1.0f) return false;
+    if (v < -1e-5f || u + v > 1.00001f) return false;
 
     // Intersection distance
     float t = (e2x * qx + e2y * qy + e2z * qz) * inv_det;
@@ -441,28 +443,32 @@ static bool savePPM(const std::string& filename,
 // ============================================================================
 
 static void applyHeatmapColormap(float* rgb, const int* nodeVisitCounts,
-                                 int width, int height) {
+                                 int width, int height, float fixedMax = 0.0f) {
     int numPixels = width * height;
 
-    // Collect non-zero (hit) counts for adaptive normalization
-    std::vector<int> hit_counts;
-    hit_counts.reserve(numPixels);
-    for (int i = 0; i < numPixels; ++i) {
-        if (nodeVisitCounts[i] > 0) {
-            hit_counts.push_back(nodeVisitCounts[i]);
+    // Determine normalization value
+    float maxVal = fixedMax;
+    
+    if (maxVal <= 0.0f) {
+        // Auto-normalize: use 99th percentile of THIS image
+        std::vector<int> hit_counts;
+        hit_counts.reserve(numPixels);
+        for (int i = 0; i < numPixels; ++i) {
+            if (nodeVisitCounts[i] > 0) {
+                hit_counts.push_back(nodeVisitCounts[i]);
+            }
+        }
+        
+        maxVal = 128.0f; // Fallback
+        if (!hit_counts.empty()) {
+            std::sort(hit_counts.begin(), hit_counts.end());
+            size_t p99_idx = std::min(hit_counts.size() - 1,
+                                       (size_t)(hit_counts.size() * 0.99));
+            maxVal = std::max(1.0f, (float)hit_counts[p99_idx]);
         }
     }
 
-    // Use 99th percentile for normalization to avoid outlier skew
-    float maxVal = 128.0f; // Fallback
-    if (!hit_counts.empty()) {
-        std::sort(hit_counts.begin(), hit_counts.end());
-        size_t p99_idx = std::min(hit_counts.size() - 1,
-                                   (size_t)(hit_counts.size() * 0.99));
-        maxVal = std::max(1.0f, (float)hit_counts[p99_idx]);
-    }
-
-    // Apply blue-cyan-green-yellow-red colormap
+    // Apply colormap using fixed maxVal
     for (int i = 0; i < numPixels; ++i) {
         if (nodeVisitCounts[i] == 0) {
             // Background/miss pixel
@@ -614,7 +620,8 @@ RenderStats renderImage(const std::vector<BVHNode>& nodes,
                         int width, int height,
                         const Camera& camera,
                         ShadingMode mode,
-                        const std::string& outputFile) {
+                        const std::string& outputFile,
+                        float fixedHeatmapMax) {
     RenderStats stats = {};
     stats.width  = width;
     stats.height = height;
@@ -738,7 +745,7 @@ RenderStats renderImage(const std::vector<BVHNode>& nodes,
 
     // ---- Apply heatmap colormap on CPU if needed ----
     if (mode == ShadingMode::HEATMAP) {
-        applyHeatmapColormap(h_rgb.data(), h_nodeVisits.data(), width, height);
+        applyHeatmapColormap(h_rgb.data(), h_nodeVisits.data(), width, height, fixedHeatmapMax);
     }
 
     // ---- Save PPM image ----

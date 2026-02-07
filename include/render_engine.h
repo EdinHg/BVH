@@ -71,7 +71,8 @@ RenderStats renderImage(const std::vector<BVHNode>& nodes,
                         int width, int height,
                         const Camera& camera,
                         ShadingMode mode,
-                        const std::string& outputFile);
+                        const std::string& outputFile,
+                        float fixedHeatmapMax = 0.0f);  // ← NEW: 0 = auto
 
 // Print render statistics to stdout in a formatted block.
 void printRenderStats(const std::string& algorithmName, const RenderStats& stats);
