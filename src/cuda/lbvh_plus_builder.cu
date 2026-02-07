@@ -13,32 +13,44 @@
 
 namespace {
 
-__device__ __forceinline__ uint32_t expandBits_P(uint32_t v) {
-    v = (v * 0x00010001u) & 0xFF0000FFu;
-    v = (v * 0x00000101u) & 0x0F00F00Fu;
-    v = (v * 0x00000011u) & 0xC30C30C3u;
-    v = (v * 0x00000005u) & 0x49249249u;
+// -----------------------------------------------------------------------------
+// 60-bit Morton Codes (20 bits per axis)
+// -----------------------------------------------------------------------------
+
+// Expands a 21-bit integer into 63 bits by inserting 2 zeros after each bit.
+__device__ __forceinline__ uint64_t expandBits_P(uint64_t v) {
+    v &= 0x1fffff;
+    v = (v | v << 32) & 0x1f00000000ffffull;
+    v = (v | v << 16) & 0x1f0000ff0000ffull;
+    v = (v | v << 8)  & 0x100f00f00f00f00full;
+    v = (v | v << 4)  & 0x10c30c30c30c30c3ull;
+    v = (v | v << 2)  & 0x1249249249249249ull;
     return v;
 }
 
-__device__ __forceinline__ uint32_t morton3D_P(float x, float y, float z) {
-    x = fminf(fmaxf(x * 1024.0f, 0.0f), 1023.0f);
-    y = fminf(fmaxf(y * 1024.0f, 0.0f), 1023.0f);
-    z = fminf(fmaxf(z * 1024.0f, 0.0f), 1023.0f);
-    return expandBits_P((uint32_t)x) * 4 + expandBits_P((uint32_t)y) * 2 + expandBits_P((uint32_t)z);
+__device__ __forceinline__ uint64_t morton3D_P(float x, float y, float z) {
+    // Range [0, 1] -> [0, 1048575] (2^20 - 1)
+    x = fminf(fmaxf(x * 1048576.0f, 0.0f), 1048575.0f);
+    y = fminf(fmaxf(y * 1048576.0f, 0.0f), 1048575.0f);
+    z = fminf(fmaxf(z * 1048576.0f, 0.0f), 1048575.0f);
+    return (expandBits_P((uint64_t)z) << 2) | (expandBits_P((uint64_t)y) << 1) | expandBits_P((uint64_t)x);
 }
 
-__device__ __forceinline__ int clz_custom_P(uint32_t x) {
-    return x == 0 ? 32 : __clz(x);
+__device__ __forceinline__ int clz_custom_P(uint64_t x) {
+    return x == 0 ? 64 : __clzll(x);
 }
 
-__device__ int delta_P(const uint32_t* sortedMortonCodes, const uint32_t* sortedIndices, int numObjects, int i, int j) {
+__device__ int delta_P(const uint64_t* sortedMortonCodes, const uint32_t* sortedIndices, int numObjects, int i, int j) {
     if (j < 0 || j >= numObjects) return -1;
-    uint32_t codeI = sortedMortonCodes[i];
-    uint32_t codeJ = sortedMortonCodes[j];
-    if (codeI == codeJ) return 32 + clz_custom_P(sortedIndices[i] ^ sortedIndices[j]);
+    uint64_t codeI = sortedMortonCodes[i];
+    uint64_t codeJ = sortedMortonCodes[j];
+    if (codeI == codeJ) return 64 + clz_custom_P((uint64_t)sortedIndices[i] ^ (uint64_t)sortedIndices[j]);
     return clz_custom_P(codeI ^ codeJ);
 }
+
+// -----------------------------------------------------------------------------
+// Common Math
+// -----------------------------------------------------------------------------
 
 __host__ __device__ __forceinline__ AABB_cw unionAABB_P(const AABB_cw& a, const AABB_cw& b) {
     return a.merge(b);
@@ -48,148 +60,219 @@ __host__ __device__ __forceinline__ float area_P(const AABB_cw& b) {
     return b.surfaceArea();
 }
 
-__device__ void optimizeTreeletAgglomerative(LBVHNode* nodes, int rootIdx) {
-    AABB_cw activeBoxes[MAX_TREELET_SIZE]; 
-    int activeNodeIdx[MAX_TREELET_SIZE];   
-    int leafCount = 0;
-
-    int collectedInternal[MAX_TREELET_SIZE]; 
-    int internalCount = 0;
-
-    int stack[32];
-    int top = 0;
-    stack[top++] = rootIdx;
-
-    while (top > 0) {
-        int curr = stack[--top];
-        LBVHNode n = nodes[curr];
-
-        if (n.leftChild & 0x80000000) {
-            if (leafCount < MAX_TREELET_SIZE) {
-                activeBoxes[leafCount] = n.bbox;
-                activeNodeIdx[leafCount] = curr;
-                leafCount++;
-            }
-        } else {
-            if (leafCount < MAX_TREELET_SIZE) {
-                if (internalCount < MAX_TREELET_SIZE) {
-                    collectedInternal[internalCount++] = curr;
-                }
-                if (top < 30) {
-                    stack[top++] = n.rightChild;
-                    stack[top++] = n.leftChild;
-                }
-            }
-        }
-    }
-
-    if (leafCount < 2) return;
-
-    int currentActive = leafCount;
-    int internalNodeUsed = 0;
-
-    while (currentActive > 1) {
-        float bestArea = 1e30f;
-        int bestI = -1, bestJ = -1;
-
-        for (int i = 0; i < currentActive; i++) {
-            for (int j = i + 1; j < currentActive; j++) {
-                AABB_cw unionBox = unionAABB_P(activeBoxes[i], activeBoxes[j]);
-                float area = area_P(unionBox);
-                if (area < bestArea) {
-                    bestArea = area;
-                    bestI = i;
-                    bestJ = j;
-                }
-            }
-        }
-
-        int targetInternalIdx;
-        if (currentActive == 2) {
-            targetInternalIdx = collectedInternal[0]; 
-        } else {
-            int availIndex = 1 + internalNodeUsed;
-            if (availIndex < internalCount) {
-                targetInternalIdx = collectedInternal[availIndex];
-            } else {
-                targetInternalIdx = collectedInternal[0]; 
-            }
-            internalNodeUsed++;
-        }
-
-        LBVHNode& n = nodes[targetInternalIdx];
-        n.leftChild = activeNodeIdx[bestI];
-        n.rightChild = activeNodeIdx[bestJ];
-        n.bbox = unionAABB_P(activeBoxes[bestI], activeBoxes[bestJ]);
-        
-        nodes[activeNodeIdx[bestI]].parent = targetInternalIdx;
-        nodes[activeNodeIdx[bestJ]].parent = targetInternalIdx;
-
-        activeBoxes[bestI] = n.bbox;
-        activeNodeIdx[bestI] = targetInternalIdx;
-
-        int last = currentActive - 1;
-        if (bestJ != last) {
-            activeBoxes[bestJ] = activeBoxes[last];
-            activeNodeIdx[bestJ] = activeNodeIdx[last];
-        }
-
-        currentActive--;
-    }
-}
-
 struct AABBReduceP {
     __host__ __device__ AABB_cw operator()(const AABB_cw& a, const AABB_cw& b) {
         return unionAABB_P(a, b);
     }
 };
 
-} // End anonymous namespace
+// -----------------------------------------------------------------------------
+// Treelet Optimization - Serial Version
+// -----------------------------------------------------------------------------
 
-__global__ void kRefitAndComputeSizes(LBVHNode* nodes, int* atomicCounters, int* subtreeSizes, int numObjects) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numObjects) return;
-
-    uint32_t idx = (numObjects - 1) + i;
-    subtreeSizes[idx] = 1;
-
-    while (idx != 0) {
-        uint32_t parent = nodes[idx].parent;
-        int oldVal = atomicAdd(&atomicCounters[parent], 1);
-        if (oldVal == 0) return;
-        __threadfence();
-
-        uint32_t left = nodes[parent].leftChild;
-        uint32_t right = nodes[parent].rightChild;
-        subtreeSizes[parent] = subtreeSizes[left] + subtreeSizes[right];
-        nodes[parent].bbox = unionAABB_P(nodes[left].bbox, nodes[right].bbox);
-        idx = parent;
+__device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
+    // 1. Gather Treelet Leaves
+    int leafCount = 0;
+    int activeNodeIdx[MAX_TREELET_SIZE];   
+    AABB_cw activeBoxes[MAX_TREELET_SIZE]; 
+    
+    activeNodeIdx[0] = rootIdx;
+    activeBoxes[0] = nodes[rootIdx].bbox;
+    leafCount = 1;
+    
+    // Greedy expansion to find leaves
+    // This finds nodes with largest surface area to expand
+    for (int step = 0; step < MAX_TREELET_SIZE - 1; ++step) {
+        int bestIdx = -1;
+        float maxArea = -1.0f;
+        
+        for (int i = 0; i < leafCount; ++i) {
+            int idx = activeNodeIdx[i];
+            LBVHNode node = nodes[idx];
+            bool isLeaf = (node.leftChild & 0x80000000);
+            
+            if (!isLeaf) {
+                float area = activeBoxes[i].surfaceArea();
+                if (area > maxArea) {
+                    maxArea = area;
+                    bestIdx = i;
+                }
+            }
+        }
+        
+        if (bestIdx == -1) break; 
+        
+        int nodeToExpand = activeNodeIdx[bestIdx];
+        LBVHNode expandedNode = nodes[nodeToExpand];
+        
+        uint32_t left = expandedNode.leftChild;
+        uint32_t right = expandedNode.rightChild;
+        
+        // Overwrite bestIdx with Left child
+        activeNodeIdx[bestIdx] = left;
+        activeBoxes[bestIdx] = nodes[left].bbox;
+        
+        // Append Right child
+        activeNodeIdx[leafCount] = right;
+        activeBoxes[leafCount] = nodes[right].bbox;
+        leafCount++;
     }
-}
+    
+    int n = leafCount;
+    if (n < 2) return; 
 
-__global__ void kOptimizeMaximalTreelets(LBVHNode* nodes, int* subtreeSizes, int numInternalNodes) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numInternalNodes) return;
+    // 2. Compute Costs (DP)
+    float cost[128]; // 1<<7
+    uint8_t partition[128];
+    
+    // Precompute Areas and Base Costs
+    for (int s = 1; s < (1 << n); ++s) {
+        if (__popc(s) == 1) {
+            // Leaf subset -> Cost 0 (for optimization purposes)
+            cost[s] = 0.0f;
+        } else {
+            cost[s] = INF;
+        }
+    }
 
-    int mySize = subtreeSizes[i];
-    if (mySize < 4 || mySize > MAX_TREELET_SIZE) return; 
-
-    bool isMaximal = false;
-    if (i == 0) {
-        isMaximal = true;
-    } else {
-        uint32_t parentIdx = nodes[i].parent;
-        if (parentIdx < (uint32_t)numInternalNodes) {
-            if (subtreeSizes[parentIdx] > MAX_TREELET_SIZE) {
-                isMaximal = true;
+    // DP Loop by size k
+    for (int k = 2; k <= n; ++k) {
+        // Iterate only subsets of size k.
+        // For n=7, loop 1..127. Check popcount.
+        for (int s = 1; s < (1 << n); ++s) {
+            if (__popc(s) == k) {
+                // Compute Area of subset S
+                // (Optimized: could memoize area too, but memory is tight)
+                AABB_cw box = AABB_cw::empty();
+                for (int i = 0; i < n; ++i) {
+                    if ((s >> i) & 1) {
+                        box = unionAABB_P(box, activeBoxes[i]);
+                    }
+                }
+                float areaS = box.surfaceArea();
+                
+                // Find best split
+                float minCost = INF;
+                int bestP = -1;
+                
+                int delta = (s - 1) & s;
+                int p = (-delta) & s;
+                
+                do {
+                    int other = s ^ p;
+                    float c = cost[p] + cost[other];
+                    if (c < minCost) {
+                        minCost = c;
+                        bestP = p;
+                    }
+                    
+                    p = (p - delta) & s;
+                } while (p != 0);
+                
+                float Ci = 1.0f; // Internal node cost factor
+                cost[s] = minCost + Ci * areaS;
+                partition[s] = (uint8_t)bestP;
             }
         }
     }
     
-    if (isMaximal) {
-        optimizeTreeletAgglomerative(nodes, i);
+    // Rebuild topology with optimal partitions
+    int availableNodes[MAX_TREELET_SIZE]; 
+    int availCount = 0;
+    
+    int stack[MAX_TREELET_SIZE];
+    int top = 0;
+    stack[top++] = rootIdx;
+    
+    // DFS to find internal nodes
+    while(top > 0) {
+        int curr = stack[--top];
+        
+        // Check if curr is a leaf of the treelet
+        bool isLeafInTreelet = false;
+        for(int i=0; i<n; ++i) {
+            if(activeNodeIdx[i] == curr) {
+                isLeafInTreelet = true;
+                break;
+            }
+        }
+        
+        if(!isLeafInTreelet) {
+            availableNodes[availCount++] = curr;
+            LBVHNode nd = nodes[curr];
+            stack[top++] = nd.leftChild; 
+            stack[top++] = nd.rightChild;
+        }
+    }
+    
+    // Assert availCount == n-1 ?
+    // If n=7 leaves, we need 6 internal nodes.
+    // availableNodes[0] should be rootIdx.
+    
+    struct Task {
+        int mask;
+        int nodeIdx;
+    };
+    Task queue[MAX_TREELET_SIZE]; 
+    int qHead = 0;
+    int qTail = 0; 
+    
+    int fullMask = (1 << n) - 1;
+    // availableNodes[0] is rootIdx.
+    queue[qTail++] = {fullMask, availableNodes[0]};
+    int usedNodes = 1;
+
+    while(qHead < qTail) {
+        Task t = queue[qHead++];
+        int mask = t.mask;
+        int currIdx = t.nodeIdx;
+        
+        int leftMask = partition[mask];
+        int rightMask = mask ^ leftMask;
+        
+        int leftNodeIdx, rightNodeIdx;
+        
+        // Left Child
+        if (__popc(leftMask) == 1) {
+            int leafPos = __ffs(leftMask) - 1; // ffs is 1-based
+            leftNodeIdx = activeNodeIdx[leafPos];
+        } else {
+            leftNodeIdx = availableNodes[usedNodes++];
+            queue[qTail++] = {leftMask, leftNodeIdx};
+        }
+        
+        // Right Child
+        if (__popc(rightMask) == 1) {
+            int leafPos = __ffs(rightMask) - 1;
+            rightNodeIdx = activeNodeIdx[leafPos];
+        } else {
+            rightNodeIdx = availableNodes[usedNodes++];
+            queue[qTail++] = {rightMask, rightNodeIdx};
+        }
+        
+        LBVHNode& node = nodes[currIdx];
+        node.leftChild = leftNodeIdx;
+        node.rightChild = rightNodeIdx;
+        
+        // Recompute BBox for this internal node immediately
+        AABB_cw box = AABB_cw::empty();
+        for(int i=0; i<n; ++i) {
+            if((mask >> i) & 1) {
+                box = unionAABB_P(box, activeBoxes[i]);
+            }
+        }
+        node.bbox = box;
+        
+        nodes[leftNodeIdx].parent = currIdx;
+        nodes[rightNodeIdx].parent = currIdx;
     }
 }
+
+} // End anonymous namespace
+
+// -----------------------------------------------------------------------------
+// Kernels
+// -----------------------------------------------------------------------------
 
 __global__ void kComputeBoundsAndCentroids_P(TrianglesSoADevice tris, int n, AABB_cw* triBBoxes, float3_cw* centroids) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -212,21 +295,28 @@ __global__ void kComputeBoundsAndCentroids_P(TrianglesSoADevice tris, int n, AAB
     centroids[i] = (minVal + maxVal) * 0.5f;
 }
 
-__global__ void kComputeMortonCodes_P(const float3_cw* centroids, int n, AABB_cw sceneBounds, uint32_t* mortonCodes, uint32_t* indices) {
+__global__ void kComputeMortonCodes_P(const float3_cw* centroids, int n, AABB_cw sceneBounds, uint64_t* mortonCodes, uint32_t* indices) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 
     float3_cw c = centroids[i];
     float3_cw minB = sceneBounds.min;
     float3_cw extents = sceneBounds.max - sceneBounds.min;
-    mortonCodes[i] = morton3D_P((c.x - minB.x) / extents.x, (c.y - minB.y) / extents.y, (c.z - minB.z) / extents.z);
+    
+    // Normalize to [0,1]
+    float nx = (c.x - minB.x) / extents.x;
+    float ny = (c.y - minB.y) / extents.y;
+    float nz = (c.z - minB.z) / extents.z;
+    
+    mortonCodes[i] = morton3D_P(nx, ny, nz);
     indices[i] = i;
 }
 
-__global__ void kBuildInternalNodes_P(const uint32_t* sortedMortonCodes, const uint32_t* sortedIndices, LBVHNode* nodes, int numObjects) {
+__global__ void kBuildInternalNodes_P(const uint64_t* sortedMortonCodes, const uint32_t* sortedIndices, LBVHNode* nodes, int numObjects) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numObjects - 1) return;
 
+    // Use 64-bit Delta
     int d = (delta_P(sortedMortonCodes, sortedIndices, numObjects, i, i + 1) - 
              delta_P(sortedMortonCodes, sortedIndices, numObjects, i, i - 1)) >= 0 ? 1 : -1;
 
@@ -268,7 +358,43 @@ __global__ void kInitLeafNodes_P(LBVHNode* nodes, const AABB_cw* triBBoxes, cons
     nodes[leafIdx].rightChild = 0xFFFFFFFF;
 }
 
-// --- CLASS IMPLEMENTATION ---
+// -----------------------------------------------------------------------------
+// Combined Refit + Optimize Kernel (Bottom-Up)
+// -----------------------------------------------------------------------------
+
+__global__ void kRefitAndOptimize(LBVHNode* nodes, int* atomicCounters, int numObjects, bool doOptimize) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numObjects) return;
+
+    uint32_t idx = (numObjects - 1) + i; 
+
+    // Bottom-up traversal
+    while (idx != 0) {
+        uint32_t parent = nodes[idx].parent;
+        int oldVal = atomicAdd(&atomicCounters[parent], 1);
+        if (oldVal == 0) return; // First thread dies
+        __threadfence();
+
+        uint32_t left = nodes[parent].leftChild;
+        uint32_t right = nodes[parent].rightChild;
+        
+        // Initial Refit before Optimization
+        nodes[parent].bbox = unionAABB_P(nodes[left].bbox, nodes[right].bbox);
+        
+        if (doOptimize) {
+            optimizeTreeletSerial(nodes, parent);
+            // Optimization updates BBox of parent internally, but propagate up?
+            // The optimization function writes `node.bbox = box;` so logic is consistent.
+            // BBox IS updated.
+        }
+        
+        idx = parent;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Helper Class
+// -----------------------------------------------------------------------------
 
 LBVHPlusBuilderCUDA::LBVHPlusBuilderCUDA() : lastBuildTimeMs(0.0f),
     time_centroids(0), time_morton(0), time_sort(0), time_topology(0), time_refit(0), time_optimize(0) {
@@ -317,13 +443,10 @@ void LBVHPlusBuilderCUDA::prepareData(const TriangleMesh& mesh) {
 void LBVHPlusBuilderCUDA::runCompute(int n) {
     if (n == 0) return;
 
-    thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
-
     int blockSize = 256;
     int gridSize = (n + blockSize - 1) / blockSize;
     int numInternalNodes = n - 1;
-    int gridSizeInternal = (numInternalNodes + blockSize - 1) / blockSize;
-
+    
     cudaEventRecord(start);
 
     kComputeBoundsAndCentroids_P<<<gridSize, blockSize>>>(getDevicePtrs(), n,
@@ -357,18 +480,37 @@ void LBVHPlusBuilderCUDA::runCompute(int n) {
         n);
     cudaEventRecord(e_topology);
 
-    kRefitAndComputeSizes<<<gridSize, blockSize>>>(
+    // Initial Refit (Correct BBoxes)
+    thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
+    kRefitAndOptimize<<<gridSize, blockSize>>>(
         thrust::raw_pointer_cast(d_nodes.data()),
         thrust::raw_pointer_cast(d_atomicCounters.data()),
-        thrust::raw_pointer_cast(d_subtreeSize.data()),
-        n);
+        n, false); // No optimize first
     cudaEventRecord(e_refit);
 
-    kOptimizeMaximalTreelets<<<gridSizeInternal, blockSize>>>(
+    // Multi-pass Optimization
+    // Loop 3 times as requested
+    // Pass 1
+    thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
+    kRefitAndOptimize<<<gridSize, blockSize>>>(
         thrust::raw_pointer_cast(d_nodes.data()),
-        thrust::raw_pointer_cast(d_subtreeSize.data()),
-        numInternalNodes);
-        
+        thrust::raw_pointer_cast(d_atomicCounters.data()),
+        n, true);
+
+    // Pass 2
+    thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
+    kRefitAndOptimize<<<gridSize, blockSize>>>(
+        thrust::raw_pointer_cast(d_nodes.data()),
+        thrust::raw_pointer_cast(d_atomicCounters.data()),
+        n, true);
+
+    // Pass 3 (Final)
+    thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
+    kRefitAndOptimize<<<gridSize, blockSize>>>(
+        thrust::raw_pointer_cast(d_nodes.data()),
+        thrust::raw_pointer_cast(d_atomicCounters.data()),
+        n, true);
+
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     

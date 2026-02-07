@@ -16,7 +16,7 @@ private:
     thrust::device_vector<float> d_v2x, d_v2y, d_v2z;
     thrust::device_vector<AABB_cw> d_triBBoxes;
     thrust::device_vector<float3_cw> d_centroids;
-    thrust::device_vector<uint32_t> d_mortonCodes;
+    thrust::device_vector<uint64_t> d_mortonCodes;
     thrust::device_vector<uint32_t> d_indices;
     thrust::device_vector<LBVHNode> d_nodes;
     
@@ -35,8 +35,8 @@ private:
     float time_sort;
     float time_topology;
     float time_refit;
-    float time_optimize; // Additional time spent in treelet restructuring.
-
+    float time_optimize;
+    
     // Profiling Events
     cudaEvent_t start, e_centroids, e_morton, e_sort, e_topology, e_refit, stop;
 
