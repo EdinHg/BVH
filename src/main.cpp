@@ -90,7 +90,7 @@ void exportBVHToOBJ(const std::string& filename, const std::vector<BVHNode>& nod
 static std::string sanitizeName(const std::string& name) {
     std::string result;
     for (char c : name) {
-        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '+') {
             result += c;
         } else if (c == ' ' || c == '(' || c == ')' || c == '=') {
             result += '_';

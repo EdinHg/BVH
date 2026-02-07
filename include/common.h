@@ -9,7 +9,7 @@
 struct __align__(16) float3_cw {
     float x, y, z;
     
-    __host__ __device__ float3_cw() : x(0), y(0), z(0) {}
+    __host__ __device__ float3_cw() {}
     __host__ __device__ float3_cw(float a, float b, float c) : x(a), y(b), z(c) {}
     
     __host__ __device__ float3_cw operator+(const float3_cw& b) const { 
@@ -30,9 +30,13 @@ struct __align__(16) AABB_cw {
     float3_cw min;
     float3_cw max;
     
-    __host__ __device__ AABB_cw() {
-        min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
-        max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    __host__ __device__ AABB_cw() {}
+    
+    __host__ __device__ static AABB_cw empty() {
+        AABB_cw res;
+        res.min = float3_cw(FLT_MAX, FLT_MAX, FLT_MAX);
+        res.max = float3_cw(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+        return res;
     }
     
     __host__ __device__ AABB_cw(const float3_cw& min_, const float3_cw& max_) 

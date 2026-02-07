@@ -87,7 +87,7 @@ __global__ void kReduceBounds_Step2_ploc(AABB_cw* data, int n) {
     int tid = threadIdx.x;
     int i = tid;
 
-    AABB_cw local; // Init with empty
+    AABB_cw local = AABB_cw::empty(); 
     
     if (tid < n) local = data[tid]; 
     else {

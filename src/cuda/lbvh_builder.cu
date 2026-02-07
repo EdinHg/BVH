@@ -240,7 +240,7 @@ void LBVHBuilderCUDA::runCompute(int n) {
         thrust::raw_pointer_cast(d_triBBoxes.data()),
         thrust::raw_pointer_cast(d_centroids.data()));
     
-    AABB_cw init; 
+    AABB_cw init = AABB_cw::empty(); 
     AABB_cw sceneBounds = thrust::reduce(d_triBBoxes.begin(), d_triBBoxes.end(), init, AABBReduce());
     
     cudaEventRecord(e_centroids);
