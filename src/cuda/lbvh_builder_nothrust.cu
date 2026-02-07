@@ -1,8 +1,7 @@
 #include "lbvh_builder_nothrust.cuh"
+#include "radix_sort_kv.cuh"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
-#include <thrust/sort.h>
-#include <thrust/device_vector.h>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -111,7 +110,6 @@ __global__ void kReduceBounds_Step2_nt(AABB_cw* data, int n) {
 
     int tid = threadIdx.x;
 
-    // 1. Initialize local registers to opposite infinity
     float local_min_x = FLT_MAX;
     float local_min_y = FLT_MAX;
     float local_min_z = FLT_MAX;
@@ -119,8 +117,8 @@ __global__ void kReduceBounds_Step2_nt(AABB_cw* data, int n) {
     float local_max_y = -FLT_MAX;
     float local_max_z = -FLT_MAX;
 
-    // 2. Loop over the input array (stride by blockDim.x)
-    // This ensures we process ALL blocks from Step 1, not just the first 256.
+    // Loop over the input array (stride by blockDim.x)
+    // process all blocks from Step 1, not just the first 256.
     int i = tid;
     while (i < n) {
         local_min_x = fminf(local_min_x, data[i].min.x);
@@ -132,7 +130,7 @@ __global__ void kReduceBounds_Step2_nt(AABB_cw* data, int n) {
         i += blockDim.x;
     }
 
-    // 3. Store accumulated local result into shared memory
+    // Store accumulated local result into shared memory
     sdata_min_x[tid] = local_min_x;
     sdata_min_y[tid] = local_min_y;
     sdata_min_z[tid] = local_min_z;
@@ -142,7 +140,7 @@ __global__ void kReduceBounds_Step2_nt(AABB_cw* data, int n) {
     
     __syncthreads();
 
-    // 4. Standard Block Reduction (256 -> 1)
+    // Standard Block Reduction (256 -> 1)
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
             sdata_min_x[tid] = fminf(sdata_min_x[tid], sdata_min_x[tid + s]);
@@ -155,7 +153,7 @@ __global__ void kReduceBounds_Step2_nt(AABB_cw* data, int n) {
         __syncthreads();
     }
 
-    // 5. Write final result to index 0
+    // Write final result to index 0
     if (tid == 0) {
         data[0].min.x = sdata_min_x[0];
         data[0].min.y = sdata_min_y[0];
@@ -251,8 +249,6 @@ __global__ void kRefitHierarchy_nt(LBVHNodeNoThrust* nodes, int* atomicCounters,
     while (idx != 0) {
         uint32_t parent = nodes[idx].parent;
         
-        // Ensure all writes to global memory (nodes[idx].bbox) are visible 
-        // to other threads before we increment the flag.
         __threadfence();
         
         int oldVal = atomicAdd(&atomicCounters[parent], 1);
@@ -397,10 +393,8 @@ void LBVHBuilderNoThrust::runCompute(int n) {
 
     cudaEventRecord(e_morton);
 
-    // 4. Sort (using Thrust for simplicity)
-    thrust::device_ptr<uint32_t> mortonPtr(d_mortonCodes);
-    thrust::device_ptr<uint32_t> indicesPtr(d_indices);
-    thrust::sort_by_key(mortonPtr, mortonPtr + n, indicesPtr);
+    // 4. Sort (Custom Radix Sort)
+    radixSortKeyValue30bit(d_mortonCodes, d_indices, n);
 
     cudaEventRecord(e_sort);
 

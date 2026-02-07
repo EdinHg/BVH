@@ -21,11 +21,11 @@ struct BVHNode {
     // primOffset: start of primitives (for leaves)
     // primCount: number of primitives (for leaves)
     
-    bool isLeaf() const { 
+    __host__ __device__ bool isLeaf() const { 
         return (leftChild < 0) || (leftChild & 0x80000000); 
     }
     
-    uint32_t getPrimitiveIndex() const {
+    __host__ __device__ uint32_t getPrimitiveIndex() const {
         return leftChild & 0x7FFFFFFF;
     }
 };

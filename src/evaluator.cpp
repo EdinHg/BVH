@@ -45,8 +45,8 @@ float BVHEvaluator::computeSAH(const std::vector<BVHNode>& nodes,
     if (rootArea <= 0.0f) return 0.0f;
     
     // Standard SAH costs
-    const float C_trav = 1.0f;      // Cost of traversing an internal node
-    const float C_intersect = 1.0f; // Cost of intersecting a primitive
+    const float C_trav = 3.0f;      // Cost of traversing an internal node
+    const float C_intersect = 2.0f; // Cost of intersecting a primitive
     
     return computeSAHRecursive(nodes, indices, mesh, 0, rootArea);
 }
@@ -64,8 +64,8 @@ float BVHEvaluator::computeSAHRecursive(const std::vector<BVHNode>& nodes,
     float nodeArea = node.bbox.surfaceArea();
     float probability = nodeArea / rootArea;
     
-    const float C_trav = 1.0f;
-    const float C_intersect = 1.0f;
+    const float C_trav = 3.0f;
+    const float C_intersect = 2.0f;
     
     if (node.isLeaf()) {
         // Leaf node: cost = probability * intersection_cost * primitive_count

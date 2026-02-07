@@ -13,9 +13,11 @@ set(SOURCES
     src/main.cpp
     src/loader.cpp
     src/evaluator.cpp
+    src/render_engine.cu
     src/cuda/lbvh_builder.cu
     src/cuda/lbvh_plus_builder.cu
     src/cuda/lbvh_builder_nothrust.cu
+    src/cuda/radix_sort_kv.cu
     src/cuda/ploc_builder.cu
 )
 
