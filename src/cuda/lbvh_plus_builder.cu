@@ -143,7 +143,7 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
             if (__popc(s) == k) {
                 // Compute Area of subset S
                 // (Optimized: could memoize area too, but memory is tight)
-                AABB_cw box = AABB_cw::empty();
+                AABB_cw box; 
                 for (int i = 0; i < n; ++i) {
                     if ((s >> i) & 1) {
                         box = unionAABB_P(box, activeBoxes[i]);
@@ -255,7 +255,7 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
         node.rightChild = rightNodeIdx;
         
         // Recompute BBox for this internal node immediately
-        AABB_cw box = AABB_cw::empty();
+        AABB_cw box;
         for(int i=0; i<n; ++i) {
             if((mask >> i) & 1) {
                 box = unionAABB_P(box, activeBoxes[i]);
@@ -453,7 +453,7 @@ void LBVHPlusBuilderCUDA::runCompute(int n) {
         thrust::raw_pointer_cast(d_triBBoxes.data()),
         thrust::raw_pointer_cast(d_centroids.data()));
     
-    AABB_cw init = AABB_cw::empty(); 
+    AABB_cw init; 
     AABB_cw sceneBounds = thrust::reduce(d_triBBoxes.begin(), d_triBBoxes.end(), init, AABBReduceP());
     cudaEventRecord(e_centroids);
 
