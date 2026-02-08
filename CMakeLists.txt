@@ -16,8 +16,6 @@ set(SOURCES
     src/render_engine.cu
     src/cuda/lbvh_builder.cu
     src/cuda/lbvh_plus_builder.cu
-    src/cuda/lbvh_builder_nothrust.cu
-    src/cuda/radix_sort_kv.cu
     src/cuda/ploc_builder.cu
 )
 
