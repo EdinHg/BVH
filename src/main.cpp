@@ -27,6 +27,14 @@ struct VizNode {
     int rightIdx;
 };
 
+// Minimal statistics storage for memory-efficient benchmarking
+struct StoredBVHStats {
+    std::string algorithmName;
+    BVHStats stats;
+    float throughput;
+    std::string timingBreakdown;
+};
+
 void exportBVHToBinary(const std::string& filename, const std::vector<BVHNode>& nodes) {
     std::ofstream file(filename, std::ios::binary);
     std::vector<VizNode> exportNodes;
@@ -83,6 +91,29 @@ void exportBVHToOBJ(const std::string& filename, const std::vector<BVHNode>& nod
         if (leavesOnly && !nodeIsLeaf) continue;
         writeBox(nodes[i].bbox);
     }
+}
+
+// Create a new mesh with triangles reordered according to Morton code sorting
+// This may improve cache locality during ray tracing
+TriangleMesh createSortedMesh(const TriangleMesh& originalMesh, 
+                              const std::vector<uint32_t>& sortedIndices) {
+    TriangleMesh sorted;
+    sorted.resize(sortedIndices.size());
+    
+    for (size_t i = 0; i < sortedIndices.size(); ++i) {
+        uint32_t originalIdx = sortedIndices[i];
+        sorted.v0x[i] = originalMesh.v0x[originalIdx];
+        sorted.v0y[i] = originalMesh.v0y[originalIdx];
+        sorted.v0z[i] = originalMesh.v0z[originalIdx];
+        sorted.v1x[i] = originalMesh.v1x[originalIdx];
+        sorted.v1y[i] = originalMesh.v1y[originalIdx];
+        sorted.v1z[i] = originalMesh.v1z[originalIdx];
+        sorted.v2x[i] = originalMesh.v2x[originalIdx];
+        sorted.v2y[i] = originalMesh.v2y[originalIdx];
+        sorted.v2z[i] = originalMesh.v2z[originalIdx];
+    }
+    
+    return sorted;
 }
 
 // Sanitize algorithm name for use as a filename component
@@ -247,36 +278,93 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 3. Print table header
+    // 3. Parse render options early (needed for heatmap pre-pass)
+    ShadingMode shadingMode = ShadingMode::NORMAL;
+    Camera camera;
+    bool needRendering = !renderPrefix.empty();
+    
+    if (needRendering) {
+        shadingMode = parseShadingMode(shadingStr);
+    }
+    
+    // 4. Heatmap mode: two-pass approach to compute global normalization
+    //    First pass: build all BVHs quickly to get maxNodesVisited
+    //    Second pass: sequential build-render-free with fixed normalization
+    float globalHeatmapMax = 0.0f;
+    
+    if (needRendering && shadingMode == ShadingMode::HEATMAP) {
+        std::cout << "\n========================================\n";
+        std::cout << "  Heatmap Pre-Pass (Global Normalization)\n";
+        std::cout << "========================================\n";
+        
+        for (auto& builder : builders) {
+            try {
+                builder->build(mesh);
+                const auto& nodes = builder->getNodes();
+                if (nodes.empty()) continue;
+                
+                // Compute camera on first builder
+                if (globalHeatmapMax == 0.0f) {
+                    camera = parseCameraString(cameraStr, cameraUpStr, fov, nodes);
+                }
+                
+                RenderStats preStats = renderImage(
+                    nodes, mesh, renderWidth, renderHeight,
+                    camera, shadingMode, "", 0.0f // Empty output, auto-normalize
+                );
+                globalHeatmapMax = std::max(globalHeatmapMax, preStats.maxNodesVisited);
+                
+                std::cout << "  " << builder->getName() << ": max = " 
+                          << preStats.maxNodesVisited << "\n";
+                
+            } catch (const std::exception& e) {
+                std::cerr << "  Error in pre-pass for " << builder->getName() 
+                          << ": " << e.what() << "\n";
+            }
+        }
+        
+        std::cout << "\nGlobal heatmap max: " << globalHeatmapMax << "\n";
+        std::cout << "Proceeding with main benchmark...\n\n";
+    }
+    
+    // 5. Main Sequential Loop: Build → Evaluate → Render → Export → Free
+    //    This ensures only one BVH exists in memory at a time
+    std::vector<StoredBVHStats> allStats;
+    std::string exportAlgoName;
+    
     std::cout << "┌──────────────────┬─────────────────────────────────────────────────────────┬──────────────┬──────────────────────────┐\n";
     std::cout << "│ Algorithm        │ Build Time (ms)                                         │ SAH Cost     │ Throughput (MTris/s)     │\n";
     std::cout << "├──────────────────┼─────────────────────────────────────────────────────────┼──────────────┼──────────────────────────┤\n";
 
-    // 4. Unified Testing Loop
-    for (auto& builder : builders) {
+    for (size_t builderIdx = 0; builderIdx < builders.size(); ++builderIdx) {
+        auto& builder = builders[builderIdx];
+        
         try {
-            // Optional warmup
-            // builder->build(mesh);
-            
-            // Run benchmark
+            // 5a. Build and evaluate BVH
             BVHStats stats = BVHEvaluator::evaluate(builder.get(), mesh);
-            
             float throughput = (mesh.size() / 1e6f) / (stats.buildTimeMs / 1000.0f);
             
+            // Store stats for later printing (memory-efficient: no BVH nodes stored)
+            StoredBVHStats stored;
+            stored.algorithmName = builder->getName();
+            stored.stats = stats;
+            stored.throughput = throughput;
+            stored.timingBreakdown = builder->getTimingBreakdown();
+            allStats.push_back(stored);
+            
+            // Print summary row
             std::cout << "│ " << std::setw(16) << std::left << builder->getName() 
                       << " │ " << std::setw(55) << std::right << std::fixed << std::setprecision(3) << stats.buildTimeMs 
                       << " │ " << std::setw(12) << std::fixed << std::setprecision(2) << stats.sahCost 
                       << " │ " << std::setw(24) << std::fixed << std::setprecision(2) << throughput << " │\n";
             
             // Print detailed timing breakdown if available
-            std::string breakdown = builder->getTimingBreakdown();
-            if (!breakdown.empty()) {
+            if (!stored.timingBreakdown.empty()) {
                 std::cout << "│                  │ Breakdown:                                              │              │                          │\n";
-                std::istringstream iss(breakdown);
+                std::istringstream iss(stored.timingBreakdown);
                 std::string line;
                 while (std::getline(iss, line)) {
                     std::cout << "│                  │ " << line;
-                    // Pad to complete the row (column width is 55)
                     int padding = 55 - static_cast<int>(line.length());
                     for (int i = 0; i < padding; ++i) std::cout << " ";
                     std::cout << " │              │                          │\n";
@@ -285,119 +373,100 @@ int main(int argc, char** argv) {
             
             std::cout << "├──────────────────┼─────────────────────────────────────────────────────────┼──────────────┼──────────────────────────┤\n";
             
+            // 5b. Render if requested
+            if (needRendering) {
+                const auto& nodes = builder->getNodes();
+                if (nodes.empty()) {
+                    std::cerr << "Warning: Skipping render for " << builder->getName()
+                              << ": no BVH nodes\n";
+                } else {
+                    // Compute camera once (on first builder for non-heatmap)
+                    if (builderIdx == 0 && shadingMode != ShadingMode::HEATMAP) {
+                        camera = parseCameraString(cameraStr, cameraUpStr, fov, nodes);
+                        std::cout << "\n[Rendering: Camera eye=("
+                                  << camera.eye.x << ", " << camera.eye.y << ", " << camera.eye.z
+                                  << ") lookAt=("
+                                  << camera.lookAt.x << ", " << camera.lookAt.y << ", " << camera.lookAt.z
+                                  << ") fov=" << camera.fovY << ", mode=" << shadingStr 
+                                  << ", resolution=" << renderWidth << "x" << renderHeight << "]\n\n";
+                    }
+                    
+                    std::string sanitized = sanitizeName(builder->getName());
+                    
+                    // Render with original mesh order
+                    std::string outFileOriginal = renderPrefix + "_" + sanitized + ".ppm";
+                    RenderStats rStatsOriginal = renderImage(
+                        nodes, mesh, renderWidth, renderHeight,
+                        camera, shadingMode, outFileOriginal, globalHeatmapMax
+                    );
+                    printRenderStats(builder->getName() + " (original)", rStatsOriginal);
+                    
+                    // Create Morton-sorted mesh and render again for comparison
+                    std::cout << "  Creating Morton-sorted mesh...\n";
+                    TriangleMesh sortedMesh = createSortedMesh(mesh, builder->getIndices());
+                    
+                    std::string outFileSorted = renderPrefix + "_" + sanitized + "_sorted.ppm";
+                    RenderStats rStatsSorted = renderImage(
+                        nodes, sortedMesh, renderWidth, renderHeight,
+                        camera, shadingMode, outFileSorted, globalHeatmapMax
+                    );
+                    printRenderStats(builder->getName() + " (sorted)", rStatsSorted);
+                    
+                    // Compare performance
+                    float timeDiff = rStatsOriginal.renderTimeMs - rStatsSorted.renderTimeMs;
+                    float perfChange = (timeDiff / rStatsOriginal.renderTimeMs) * 100.0f;
+                    std::cout << "  Morton-sorted mesh: ";
+                    if (timeDiff > 0) {
+                        std::cout << "FASTER by " << std::fixed << std::setprecision(2) 
+                                  << timeDiff << " ms (" << perfChange << "% improvement)\n";
+                    } else {
+                        std::cout << "SLOWER by " << std::fixed << std::setprecision(2) 
+                                  << -timeDiff << " ms (" << -perfChange << "% slower)\n";
+                    }
+                    std::cout << "\n";
+                }
+            }
+            
+            // 5c. Export BVH if requested (first or PLOC r=25)
+            if (!outputFile.empty() && exportAlgoName.empty()) {
+                bool shouldExport = (builderIdx == 0) || 
+                                    (builder->getName() == "PLOC CUDA (r=25)");
+                                    
+                if (shouldExport) {
+                    exportAlgoName = builder->getName();
+                    std::cout << "Exporting BVH from " << exportAlgoName << "...\n";
+                    const auto& nodes = builder->getNodes();
+                    
+                    if (colabExport) {
+                        std::cout << "Exporting to binary format: " << outputFile << "\n";
+                        exportBVHToBinary(outputFile, nodes);
+                    } else {
+                        std::cout << "Exporting to OBJ format: " << outputFile << "\n";
+                        exportBVHToOBJ(outputFile, nodes, leavesOnly);
+                        std::cout << "Exported " << nodes.size() << " nodes\n";
+                    }
+                    std::cout << "\n";
+                }
+            }
+            
+            // 5d. Memory cleanup happens automatically when next builder->build() is called
+            //     or when the builder goes out of scope
+            
         } catch (const std::exception& e) {
-            std::cerr << "Error evaluating " << builder->getName() << ": " << e.what() << "\n";
+            std::cerr << "Error processing " << builder->getName() << ": " << e.what() << "\n";
             std::cout << "├──────────────────┼─────────────────────────────────────────────────────────┼──────────────┼──────────────────────────┤\n";
         }
     }
     
     std::cout << "└──────────────────┴─────────────────────────────────────────────────────────┴──────────────┴──────────────────────────┘\n\n";
 
-    // 4. Export BVH if requested
-    if (!outputFile.empty() && !builders.empty()) {
-        // Default to the first builder
-        BVHBuilder* exporter = builders[0].get();
-
-        // Try to find PLOC r=25 specifically as requested
-        for (auto& b : builders) {
-            if (b->getName() == "PLOC CUDA (r=25)") {
-                exporter = b.get();
-                break;
-            }
-        }
-
-        std::cout << "Exporting BVH from " << exporter->getName() << "...\n";
-        const auto& nodes = exporter->getNodes();
-        
-        if (colabExport) {
-            std::cout << "Exporting to binary format: " << outputFile << "\n";
-            exportBVHToBinary(outputFile, nodes);
-        } else {
-            std::cout << "Exporting to OBJ format: " << outputFile << "\n";
-            exportBVHToOBJ(outputFile, nodes, leavesOnly);
-            std::cout << "Exported " << nodes.size() << " nodes\n";
-        }
-    }
-
-    // 5. Render images if requested
-    if (!renderPrefix.empty() && !builders.empty()) {
-        std::cout << "\n========================================\n";
-        std::cout << "  Rendering\n";
-        std::cout << "========================================\n";
-
-        ShadingMode shadingMode = parseShadingMode(shadingStr);
-
-        // Use the first builder's BVH for auto-camera computation
-        Camera camera = parseCameraString(cameraStr, cameraUpStr, fov,
-                                          builders[0]->getNodes());
-
-        // ---- NEW: Compute global heatmap max if using heatmap mode ----
-        float globalHeatmapMax = 0.0f;
-        if (shadingMode == ShadingMode::HEATMAP) {
-            std::cout << "Pre-rendering to compute global heatmap normalization...\n";
-            for (auto& builder : builders) {
-                const auto& nodes = builder->getNodes();
-                if (nodes.empty()) continue;
-
-                RenderStats preStats = renderImage(
-                    nodes, mesh, renderWidth, renderHeight,
-                    camera, shadingMode, "", 0.0f // Empty output, auto-normalize
-                );
-                globalHeatmapMax = std::max(globalHeatmapMax, preStats.maxNodesVisited);
-            }
-            std::cout << "Global heatmap max (p99.9): " << globalHeatmapMax << "\n\n";
-        }
-
-        std::cout << "Camera: eye=("
-                  << camera.eye.x << ", " << camera.eye.y << ", " << camera.eye.z
-                  << ") lookAt=("
-                  << camera.lookAt.x << ", " << camera.lookAt.y << ", " << camera.lookAt.z
-                  << ") fov=" << camera.fovY << "\n";
-        std::cout << "Shading: " << shadingStr << "  Resolution: "
-                  << renderWidth << "x" << renderHeight << "\n\n";
-
-        for (auto& builder : builders) {
-            try {
-                const auto& nodes = builder->getNodes();
-                if (nodes.empty()) {
-                    std::cerr << "Skipping render for " << builder->getName()
-                              << ": no BVH nodes\n";
-                    continue;
-                }
-
-                std::string sanitized = sanitizeName(builder->getName());
-                std::string outFile = renderPrefix + "_" + sanitized + ".ppm";
-
-                RenderStats rStats = renderImage(
-                    nodes, mesh,
-                    renderWidth, renderHeight,
-                    camera, shadingMode, outFile,
-                    globalHeatmapMax  // ← Use fixed max
-                );
-
-                printRenderStats(builder->getName(), rStats);
-                std::cout << "\n";
-
-            } catch (const std::exception& e) {
-                std::cerr << "Error rendering " << builder->getName()
-                          << ": " << e.what() << "\n";
-            }
-        }
-    }
-
-    // 6. Print detailed statistics for each algorithm
+    // 6. Print detailed statistics from stored data (no re-building needed)
     std::cout << "========================================\n";
     std::cout << "  Detailed Statistics\n";
     std::cout << "========================================\n";
     
-    for (auto& builder : builders) {
-        try {
-            // Build again to get fresh stats (or cache from previous run)
-            BVHStats stats = BVHEvaluator::evaluate(builder.get(), mesh);
-            BVHEvaluator::printStats(builder->getName(), stats);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << "\n";
-        }
+    for (const auto& stored : allStats) {
+        BVHEvaluator::printStats(stored.algorithmName, stored.stats);
     }
 
     std::cout << "\n========================================\n";
