@@ -345,7 +345,7 @@ int main(int argc, char** argv) {
                 );
                 globalHeatmapMax = std::max(globalHeatmapMax, preStats.maxNodesVisited);
             }
-            std::cout << "Global heatmap max (p99): " << globalHeatmapMax << "\n\n";
+            std::cout << "Global heatmap max (p99.9): " << globalHeatmapMax << "\n\n";
         }
 
         std::cout << "Camera: eye=("
