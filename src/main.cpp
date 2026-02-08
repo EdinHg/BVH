@@ -4,7 +4,6 @@
 #include "../include/render_engine.h"
 #include "cuda/lbvh_builder.cuh"
 #include "cuda/lbvh_plus_builder.cuh"
-#include "cuda/lbvh_builder_nothrust.cuh"
 #include "cuda/ploc_builder.cuh"
 
 #include <iostream>
@@ -107,7 +106,7 @@ void printUsage(const char* programName) {
     std::cout << "Options:\n";
     std::cout << "  -i, --input <file>        Load OBJ file\n";
     std::cout << "  -n, --triangles <count>   Generate N random triangles (default: 1000000)\n";
-    std::cout << "  -a, --algorithm <name>    Run specific algorithm (lbvh, lbvh-nothrust, ploc, all)\n";
+    std::cout << "  -a, --algorithm <name>    Run specific algorithm (lbvh, ploc, all)\n";
     std::cout << "  -o, --output <file>       Export BVH to file\n";
     std::cout << "  -c, --colab-export        Export as binary (for Colab visualization)\n";
     std::cout << "  -l, --leaves-only         Export only leaf bounding boxes\n";
@@ -220,7 +219,6 @@ int main(int argc, char** argv) {
     if (selectedAlgo == "all") {
         builders.push_back(std::make_unique<LBVHBuilderCUDA>());
         builders.push_back(std::make_unique<LBVHPlusBuilderCUDA>());
-        builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
         builders.push_back(std::make_unique<PLOCBuilderCUDA>(10));
         builders.push_back(std::make_unique<PLOCBuilderCUDA>(25));
         builders.push_back(std::make_unique<PLOCBuilderCUDA>(100));
@@ -230,9 +228,6 @@ int main(int argc, char** argv) {
     }
     else if (selectedAlgo == "lbvh+") {
         builders.push_back(std::make_unique<LBVHPlusBuilderCUDA>());
-    }
-    else if (selectedAlgo == "lbvh-nothrust") {
-        builders.push_back(std::make_unique<LBVHBuilderNoThrust>());
     }
     else if (selectedAlgo == "ploc") {
         if (radius > 0) {
@@ -248,7 +243,7 @@ int main(int argc, char** argv) {
     }
     else {
         std::cerr << "Unknown algorithm: " << selectedAlgo << "\n";
-        std::cerr << "Available: lbvh, lbvh+, lbvh-nothrust, ploc, all\n";
+        std::cerr << "Available: lbvh, lbvh+, ploc, all\n";
         return 1;
     }
 
