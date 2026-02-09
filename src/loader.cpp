@@ -32,37 +32,37 @@ TriangleMesh loadOBJ(const std::string& filename) {
             vertices.push_back(v);
         }
         else if (prefix == "f") {
-            // Face (triangle)
-            int indices[3];
+            // Face — supports triangles, quads, and n-gons via fan triangulation
+            std::vector<int> faceIndices;
             std::string token;
             
-            for (int i = 0; i < 3; ++i) {
-                ss >> token;
+            while (ss >> token) {
                 size_t slash = token.find('/');
                 std::string indexStr = (slash != std::string::npos) ? token.substr(0, slash) : token;
                 
                 int rawIndex = std::stoi(indexStr);
 
                 if (rawIndex < 0) {
-                    indices[i] = (int)vertices.size() + rawIndex;
+                    faceIndices.push_back((int)vertices.size() + rawIndex);
                 } else {
-                    indices[i] = rawIndex - 1;
+                    faceIndices.push_back(rawIndex - 1);
                 }
             }
             
-            // Validate indices
-            bool valid = true;
-            for (int i = 0; i < 3; ++i) {
-                if (indices[i] < 0 || indices[i] >= (int)vertices.size()) {
-                    valid = false;
-                    break;
+            // Fan triangulation: (v0, v1, v2), (v0, v2, v3), (v0, v3, v4), ...
+            for (size_t i = 1; i + 1 < faceIndices.size(); ++i) {
+                int idx0 = faceIndices[0];
+                int idx1 = faceIndices[i];
+                int idx2 = faceIndices[i + 1];
+                
+                // Validate indices
+                if (idx0 < 0 || idx0 >= (int)vertices.size() ||
+                    idx1 < 0 || idx1 >= (int)vertices.size() ||
+                    idx2 < 0 || idx2 >= (int)vertices.size()) {
+                    continue;
                 }
-            }
-            
-            if (valid) {
-                mesh.addTriangle(vertices[indices[0]], 
-                               vertices[indices[1]], 
-                               vertices[indices[2]]);
+                
+                mesh.addTriangle(vertices[idx0], vertices[idx1], vertices[idx2]);
             }
         }
     }

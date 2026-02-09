@@ -26,7 +26,7 @@
 // Constants
 // ============================================================================
 
-#define BVH_STACK_SIZE 64
+#define BVH_STACK_SIZE 128
 #define RENDER_BLOCK_SIZE 16
 #define EPSILON 1e-6f
 

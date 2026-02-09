@@ -93,61 +93,6 @@ void exportBVHToOBJ(const std::string& filename, const std::vector<BVHNode>& nod
     }
 }
 
-// Create a new mesh with triangles reordered according to Morton code sorting
-// This may improve cache locality during ray tracing
-TriangleMesh createSortedMesh(const TriangleMesh& originalMesh, 
-                              const std::vector<uint32_t>& sortedIndices) {
-    TriangleMesh sorted;
-    sorted.resize(sortedIndices.size());
-    
-    for (size_t i = 0; i < sortedIndices.size(); ++i) {
-        uint32_t originalIdx = sortedIndices[i];
-        sorted.v0x[i] = originalMesh.v0x[originalIdx];
-        sorted.v0y[i] = originalMesh.v0y[originalIdx];
-        sorted.v0z[i] = originalMesh.v0z[originalIdx];
-        sorted.v1x[i] = originalMesh.v1x[originalIdx];
-        sorted.v1y[i] = originalMesh.v1y[originalIdx];
-        sorted.v1z[i] = originalMesh.v1z[originalIdx];
-        sorted.v2x[i] = originalMesh.v2x[originalIdx];
-        sorted.v2y[i] = originalMesh.v2y[originalIdx];
-        sorted.v2z[i] = originalMesh.v2z[originalIdx];
-    }
-    
-    return sorted;
-}
-
-// Create reverse mapping: originalIdx -> sortedPosition
-// This is needed to remap BVH leaf indices when using sorted mesh
-std::vector<uint32_t> createReverseMapping(const std::vector<uint32_t>& sortedIndices) {
-    std::vector<uint32_t> reverseMap(sortedIndices.size());
-    for (size_t i = 0; i < sortedIndices.size(); ++i) {
-        reverseMap[sortedIndices[i]] = static_cast<uint32_t>(i);
-    }
-    return reverseMap;
-}
-
-// Remap BVH leaf primitive indices to match sorted mesh positions
-// This is CRITICAL: BVH leaf nodes store original triangle indices.
-// When we use a sorted mesh, we must update these indices to point to
-// the new positions in the sorted mesh, otherwise we'll access wrong triangles!
-std::vector<BVHNode> remapBVHForSortedMesh(
-    const std::vector<BVHNode>& originalNodes,
-    const std::vector<uint32_t>& reverseMap) {
-    
-    std::vector<BVHNode> remappedNodes = originalNodes; // Copy structure
-    
-    for (auto& node : remappedNodes) {
-        if (node.isLeaf()) {
-            uint32_t originalIdx = node.getPrimitiveIndex();
-            uint32_t sortedIdx = reverseMap[originalIdx];
-            // Update leaf to point to new position, keeping the leaf marker bit
-            node.leftChild = static_cast<int32_t>(sortedIdx | 0x80000000);
-        }
-    }
-    
-    return remappedNodes;
-}
-
 // Sanitize algorithm name for use as a filename component
 static std::string sanitizeName(const std::string& name) {
     std::string result;
@@ -424,43 +369,13 @@ int main(int argc, char** argv) {
                     }
                     
                     std::string sanitized = sanitizeName(builder->getName());
+                    std::string outFile = renderPrefix + "_" + sanitized + ".ppm";
                     
-                    // Render with original mesh order
-                    std::string outFileOriginal = renderPrefix + "_" + sanitized + ".ppm";
-                    RenderStats rStatsOriginal = renderImage(
+                    RenderStats rStats = renderImage(
                         nodes, mesh, renderWidth, renderHeight,
-                        camera, shadingMode, outFileOriginal, globalHeatmapMax
+                        camera, shadingMode, outFile, globalHeatmapMax
                     );
-                    printRenderStats(builder->getName() + " (original)", rStatsOriginal);
-                    
-                    // Create Morton-sorted mesh and render again for comparison
-                    std::cout << "  Creating Morton-sorted mesh and remapping BVH...\n";
-                    const auto& sortedIndices = builder->getIndices();
-                    TriangleMesh sortedMesh = createSortedMesh(mesh, sortedIndices);
-                    
-                    // CRITICAL FIX: Remap BVH leaf indices to match sorted mesh positions
-                    // Without this, the BVH would access wrong triangles in the sorted mesh!
-                    auto reverseMap = createReverseMapping(sortedIndices);
-                    auto remappedNodes = remapBVHForSortedMesh(nodes, reverseMap);
-                    
-                    std::string outFileSorted = renderPrefix + "_" + sanitized + "_sorted.ppm";
-                    RenderStats rStatsSorted = renderImage(
-                        remappedNodes, sortedMesh, renderWidth, renderHeight,
-                        camera, shadingMode, outFileSorted, globalHeatmapMax
-                    );
-                    printRenderStats(builder->getName() + " (sorted)", rStatsSorted);
-                    
-                    // Compare performance
-                    float timeDiff = rStatsOriginal.renderTimeMs - rStatsSorted.renderTimeMs;
-                    float perfChange = (timeDiff / rStatsOriginal.renderTimeMs) * 100.0f;
-                    std::cout << "  Morton-sorted mesh: ";
-                    if (timeDiff > 0) {
-                        std::cout << "FASTER by " << std::fixed << std::setprecision(2) 
-                                  << timeDiff << " ms (" << perfChange << "% improvement)\n";
-                    } else {
-                        std::cout << "SLOWER by " << std::fixed << std::setprecision(2) 
-                                  << -timeDiff << " ms (" << -perfChange << "% slower)\n";
-                    }
+                    printRenderStats(builder->getName(), rStats);
                     std::cout << "\n";
                 }
             }

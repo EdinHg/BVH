@@ -304,9 +304,9 @@ __global__ void kComputeMortonCodes_P(const float3_cw* centroids, int n, AABB_cw
     float3_cw extents = sceneBounds.max - sceneBounds.min;
     
     // Normalize to [0,1]
-    float nx = (c.x - minB.x) / extents.x;
-    float ny = (c.y - minB.y) / extents.y;
-    float nz = (c.z - minB.z) / extents.z;
+    float nx = (c.x - minB.x) / ((extents.x > 1e-6f) ? extents.x : 1.0f);
+    float ny = (c.y - minB.y) / ((extents.y > 1e-6f) ? extents.y : 1.0f);
+    float nz = (c.z - minB.z) / ((extents.z > 1e-6f) ? extents.z : 1.0f);
     
     mortonCodes[i] = morton3D_P(nx, ny, nz);
     indices[i] = i;
@@ -371,9 +371,9 @@ __global__ void kRefitAndOptimize(LBVHNode* nodes, int* atomicCounters, int numO
     // Bottom-up traversal
     while (idx != 0) {
         uint32_t parent = nodes[idx].parent;
+        __threadfence(); // Ensure bbox writes are globally visible before signaling
         int oldVal = atomicAdd(&atomicCounters[parent], 1);
         if (oldVal == 0) return; // First thread dies
-        __threadfence();
 
         uint32_t left = nodes[parent].leftChild;
         uint32_t right = nodes[parent].rightChild;

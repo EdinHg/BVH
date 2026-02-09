@@ -172,9 +172,9 @@ __global__ void kComputeMortonCodes_nt(const float3_cw* centroids, int n, AABB_c
     float3_cw minB = sceneBounds.min;
     float3_cw extents = sceneBounds.max - sceneBounds.min;
 
-    float x = (c.x - minB.x) / extents.x;
-    float y = (c.y - minB.y) / extents.y;
-    float z = (c.z - minB.z) / extents.z;
+    float x = (c.x - minB.x) / ((extents.x > 1e-6f) ? extents.x : 1.0f);
+    float y = (c.y - minB.y) / ((extents.y > 1e-6f) ? extents.y : 1.0f);
+    float z = (c.z - minB.z) / ((extents.z > 1e-6f) ? extents.z : 1.0f);
 
     mortonCodes[i] = morton3D_nt(x, y, z);
     indices[i] = i;
