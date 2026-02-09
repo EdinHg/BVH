@@ -2,7 +2,6 @@
 
 #include "../../include/bvh_builder.h"
 #include "../../include/common.h"
-#include <thrust/device_vector.h>
 #include <cuda_runtime.h>
 #include <sstream>
 
@@ -16,21 +15,23 @@ struct LBVHNode {
 
 class LBVHBuilderCUDA : public BVHBuilder {
 private:
-    // Device Vectors
-    thrust::device_vector<float> d_v0x, d_v0y, d_v0z;
-    thrust::device_vector<float> d_v1x, d_v1y, d_v1z;
-    thrust::device_vector<float> d_v2x, d_v2y, d_v2z;
-    thrust::device_vector<AABB_cw> d_triBBoxes;
-    thrust::device_vector<float3_cw> d_centroids;
-    thrust::device_vector<uint32_t> d_mortonCodes;
-    thrust::device_vector<uint32_t> d_indices;
-    thrust::device_vector<LBVHNode> d_nodes;
-    thrust::device_vector<int> d_atomicFlags;
+    // Device pointers (raw CUDA memory)
+    float *d_v0x, *d_v0y, *d_v0z;
+    float *d_v1x, *d_v1y, *d_v1z;
+    float *d_v2x, *d_v2y, *d_v2z;
+    AABB_cw* d_triBBoxes;
+    float3_cw* d_centroids;
+    uint32_t* d_mortonCodes;
+    uint32_t* d_indices;
+    LBVHNode* d_nodes;
+    int* d_atomicFlags;
+    AABB_cw* d_boundsReduction;
 
     // Host-side results
     std::vector<BVHNode> h_nodes;
     std::vector<uint32_t> h_indices;
     float lastBuildTimeMs;
+    int numTriangles;
     
     // Timing breakdown
     float time_centroids;
