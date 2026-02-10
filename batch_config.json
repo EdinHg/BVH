@@ -1,0 +1,34 @@
+{
+  "iterations": 5,
+  "warmup": true,
+  "quiet": false,
+  "output": "batch_results.csv",
+  "algorithms": ["all"],
+  "ploc_radius": [10, 25, 100],
+  "models": [
+    {
+      "type": "random",
+      "triangles": 1000000,
+      "name": "random_1M"
+    },
+    {
+      "type": "random",
+      "triangles": 5000000,
+      "name": "random_5M"
+    },
+    {
+      "type": "obj",
+      "path": "models/bunny.obj"
+    },
+    {
+      "type": "obj",
+      "path": "models/dragon.obj"
+    }
+  ],
+  "render": {
+    "enabled": false,
+    "prefix": "batch_render",
+    "size": "1024x768",
+    "shading": "normal"
+  }
+}

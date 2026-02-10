@@ -2,6 +2,8 @@
 #include "../include/evaluator.h"
 #include "../include/mesh.h"
 #include "../include/render_engine.h"
+#include "../include/batch_config.h"
+#include "../include/batch_runner.h"
 #include "cuda/lbvh_builder.cuh"
 #include "cuda/lbvh_plus_builder.cuh"
 #include "cuda/ploc_builder.cuh"
@@ -115,10 +117,13 @@ static std::string sanitizeName(const std::string& name) {
 void printUsage(const char* programName) {
     std::cout << "BVH Construction Algorithm Comparison Tool\n\n";
     std::cout << "Usage: " << programName << " [options]\n\n";
-    std::cout << "Options:\n";
+    std::cout << "Batch Testing Mode:\n";
+    std::cout << "  --batch <config.json>     Run batch tests from JSON configuration file\n";
+    std::cout << "  --batch-quiet             Suppress all output except errors\n\n";
+    std::cout << "Interactive Mode Options:\n";
     std::cout << "  -i, --input <file>        Load OBJ file\n";
     std::cout << "  -n, --triangles <count>   Generate N random triangles (default: 1000000)\n";
-    std::cout << "  -a, --algorithm <name>    Run specific algorithm (lbvh, ploc, all)\n";
+    std::cout << "  -a, --algorithm <name>    Run specific algorithm (lbvh, lbvh+, ploc, all)\n";
     std::cout << "  -o, --output <file>       Export BVH to file\n";
     std::cout << "  -c, --colab-export        Export as binary (for Colab visualization)\n";
     std::cout << "  -l, --leaves-only         Export only leaf bounding boxes\n";
@@ -133,12 +138,10 @@ void printUsage(const char* programName) {
     std::cout << "  --camera-up <ux,uy,uz>    Camera up vector (default: 0,1,0)\n";
     std::cout << "  --fov <degrees>           Vertical FOV (default: 60)\n\n";
     std::cout << "Examples:\n";
+    std::cout << "  " << programName << " --batch batch_config.json\n";
     std::cout << "  " << programName << " -i bunny.obj\n";
     std::cout << "  " << programName << " -n 10000000 -a lbvh\n";
     std::cout << "  " << programName << " -n 1000000 -o bvh.bin -c\n";
-    std::cout << "  " << programName << " -i bunny.obj --render output --shading heatmap\n";
-    std::cout << "  " << programName << " -i bunny.obj --render img --camera 0,1,3,0,0,0 --fov 45\n";
-    std::cout << "  " << programName << " -n 1000000 --csv-export stats.csv\n";
 }
 
 // Export statistics to CSV file
@@ -194,7 +197,35 @@ void exportStatsToCSV(const std::string& filename,
 }
 
 int main(int argc, char** argv) {
-    // Parse command-line arguments
+    // Check for batch mode first
+    std::string batchConfigFile;
+    bool batchQuiet = false;
+    
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--batch" && i + 1 < argc) {
+            batchConfigFile = argv[++i];
+        } else if (arg == "--batch-quiet") {
+            batchQuiet = true;
+        }
+    }
+    
+    // If batch mode is requested, run batch tests and exit
+    if (!batchConfigFile.empty()) {
+        try {
+            BatchConfig config = loadBatchConfig(batchConfigFile);
+            config.quiet = batchQuiet || config.quiet;
+            
+            BatchRunner runner;
+            runner.run(config);
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << "Batch mode error: " << e.what() << "\n";
+            return 1;
+        }
+    }
+    
+    // Parse command-line arguments for interactive mode
     std::string selectedAlgo = "all";
     std::string outputFile;
     std::string csvExportFile;
