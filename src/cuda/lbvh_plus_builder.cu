@@ -437,6 +437,9 @@ void LBVHPlusBuilderCUDA::cleanup() {
     d_nodes.clear(); d_nodes.shrink_to_fit();
     d_atomicCounters.clear(); d_atomicCounters.shrink_to_fit();
     d_subtreeSize.clear(); d_subtreeSize.shrink_to_fit();
+    
+    // Ensure all CUDA operations complete before returning
+    cudaDeviceSynchronize();
 }
 
 TrianglesSoADevice LBVHPlusBuilderCUDA::getDevicePtrs() {

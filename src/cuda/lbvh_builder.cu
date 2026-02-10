@@ -322,6 +322,9 @@ void LBVHBuilderCUDA::cleanup() {
     if (d_nodes) { cudaFree(d_nodes); d_nodes = nullptr; }
     if (d_atomicFlags) { cudaFree(d_atomicFlags); d_atomicFlags = nullptr; }
     if (d_boundsReduction) { cudaFree(d_boundsReduction); d_boundsReduction = nullptr; }
+    
+    // Ensure all CUDA operations complete before returning
+    cudaDeviceSynchronize();
 }
 
 TrianglesSoADevice LBVHBuilderCUDA::getDevicePtrs() {
@@ -393,6 +396,10 @@ void LBVHBuilderCUDA::runCompute(int n) {
 
     AABB_cw sceneBounds;
     CUDA_CHECK(cudaMemcpy(&sceneBounds, d_boundsReduction, sizeof(AABB_cw), cudaMemcpyDeviceToHost));
+    
+    // Free temporary bounds reduction buffer (no longer needed after this point)
+    CUDA_CHECK(cudaFree(d_boundsReduction));
+    d_boundsReduction = nullptr;
 
     cudaEventRecord(e_centroids);
 

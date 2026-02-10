@@ -116,6 +116,16 @@ void BatchRunner::testAlgorithm(BVHBuilder* builder,
         }
         
         results.push_back(result);
+        
+        // Aggressive cleanup after each iteration to prevent memory accumulation
+        auto* lbvh = dynamic_cast<LBVHBuilderCUDA*>(builder);
+        if (lbvh) lbvh->cleanup();
+        
+        auto* lbvhPlus = dynamic_cast<LBVHPlusBuilderCUDA*>(builder);
+        if (lbvhPlus) lbvhPlus->cleanup();
+        
+        auto* ploc = dynamic_cast<PLOCBuilderCUDA*>(builder);
+        if (ploc) ploc->cleanup();
     }
 }
 
@@ -309,16 +319,23 @@ void BatchRunner::run(const BatchConfig& config) {
         std::cout << "========================================\n\n";
     }
     
-    // Create builders
-    auto builders = createBuilders(config);
+    // Create a temporary builder set to calculate algorithm count for display
+    auto tempBuilders = createBuilders(config);
+    int algorithmCount = tempBuilders.size();
+    
+    // Clean up temporary builders (they were just for counting)
+    for (auto& bp : tempBuilders) {
+        delete bp.builder;
+    }
+    tempBuilders.clear();
     
     // Calculate total tests
-    int totalTests = config.models.size() * builders.size() * config.iterations;
+    int totalTests = config.models.size() * algorithmCount * config.iterations;
     
     if (!config.quiet) {
         std::cout << "Configuration: " << config.outputFile << "\n";
         std::cout << "Models: " << config.models.size();
-        std::cout << ", Algorithms: " << builders.size();
+        std::cout << ", Algorithms: " << algorithmCount;
         std::cout << ", Iterations: " << config.iterations;
         if (config.warmup) std::cout << " (+ 1 warmup)";
         std::cout << "\n";
