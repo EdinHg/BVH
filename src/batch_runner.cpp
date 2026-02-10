@@ -64,6 +64,16 @@ void BatchRunner::testAlgorithm(BVHBuilder* builder,
     if (warmup) {
         try {
             builder->build(mesh);
+            
+            // Clean up GPU memory after warmup to free space before timed iterations
+            auto* lbvh = dynamic_cast<LBVHBuilderCUDA*>(builder);
+            if (lbvh) lbvh->cleanup();
+            
+            auto* lbvhPlus = dynamic_cast<LBVHPlusBuilderCUDA*>(builder);
+            if (lbvhPlus) lbvhPlus->cleanup();
+            
+            auto* ploc = dynamic_cast<PLOCBuilderCUDA*>(builder);
+            if (ploc) ploc->cleanup();
         } catch (...) {
             // Ignore warmup errors
         }

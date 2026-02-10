@@ -408,6 +408,8 @@ LBVHPlusBuilderCUDA::LBVHPlusBuilderCUDA() : lastBuildTimeMs(0.0f),
 }
 
 LBVHPlusBuilderCUDA::~LBVHPlusBuilderCUDA() {
+    cleanup();
+    
     cudaEventDestroy(start);
     cudaEventDestroy(e_centroids);
     cudaEventDestroy(e_morton);
@@ -415,6 +417,26 @@ LBVHPlusBuilderCUDA::~LBVHPlusBuilderCUDA() {
     cudaEventDestroy(e_topology);
     cudaEventDestroy(e_refit);
     cudaEventDestroy(stop);
+}
+
+void LBVHPlusBuilderCUDA::cleanup() {
+    // Free all thrust device vectors (they manage their own memory)
+    d_v0x.clear(); d_v0x.shrink_to_fit();
+    d_v0y.clear(); d_v0y.shrink_to_fit();
+    d_v0z.clear(); d_v0z.shrink_to_fit();
+    d_v1x.clear(); d_v1x.shrink_to_fit();
+    d_v1y.clear(); d_v1y.shrink_to_fit();
+    d_v1z.clear(); d_v1z.shrink_to_fit();
+    d_v2x.clear(); d_v2x.shrink_to_fit();
+    d_v2y.clear(); d_v2y.shrink_to_fit();
+    d_v2z.clear(); d_v2z.shrink_to_fit();
+    d_triBBoxes.clear(); d_triBBoxes.shrink_to_fit();
+    d_centroids.clear(); d_centroids.shrink_to_fit();
+    d_mortonCodes.clear(); d_mortonCodes.shrink_to_fit();
+    d_indices.clear(); d_indices.shrink_to_fit();
+    d_nodes.clear(); d_nodes.shrink_to_fit();
+    d_atomicCounters.clear(); d_atomicCounters.shrink_to_fit();
+    d_subtreeSize.clear(); d_subtreeSize.shrink_to_fit();
 }
 
 TrianglesSoADevice LBVHPlusBuilderCUDA::getDevicePtrs() {
@@ -426,6 +448,9 @@ TrianglesSoADevice LBVHPlusBuilderCUDA::getDevicePtrs() {
 }
 
 void LBVHPlusBuilderCUDA::prepareData(const TriangleMesh& mesh) {
+    // Free any previous allocations before allocating new ones
+    cleanup();
+    
     int n = mesh.size();
     d_v0x = mesh.v0x; d_v0y = mesh.v0y; d_v0z = mesh.v0z;
     d_v1x = mesh.v1x; d_v1y = mesh.v1y; d_v1z = mesh.v1z;

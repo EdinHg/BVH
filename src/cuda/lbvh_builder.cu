@@ -294,23 +294,8 @@ LBVHBuilderCUDA::LBVHBuilderCUDA() :
 }
 
 LBVHBuilderCUDA::~LBVHBuilderCUDA() {
-    if (d_v0x) cudaFree(d_v0x);
-    if (d_v0y) cudaFree(d_v0y);
-    if (d_v0z) cudaFree(d_v0z);
-    if (d_v1x) cudaFree(d_v1x);
-    if (d_v1y) cudaFree(d_v1y);
-    if (d_v1z) cudaFree(d_v1z);
-    if (d_v2x) cudaFree(d_v2x);
-    if (d_v2y) cudaFree(d_v2y);
-    if (d_v2z) cudaFree(d_v2z);
-    if (d_triBBoxes) cudaFree(d_triBBoxes);
-    if (d_centroids) cudaFree(d_centroids);
-    if (d_mortonCodes) cudaFree(d_mortonCodes);
-    if (d_indices) cudaFree(d_indices);
-    if (d_nodes) cudaFree(d_nodes);
-    if (d_atomicFlags) cudaFree(d_atomicFlags);
-    if (d_boundsReduction) cudaFree(d_boundsReduction);
-
+    cleanup();
+    
     cudaEventDestroy(start);
     cudaEventDestroy(e_centroids);
     cudaEventDestroy(e_morton);
@@ -319,11 +304,34 @@ LBVHBuilderCUDA::~LBVHBuilderCUDA() {
     cudaEventDestroy(stop);
 }
 
+void LBVHBuilderCUDA::cleanup() {
+    // Free all device memory allocations
+    if (d_v0x) { cudaFree(d_v0x); d_v0x = nullptr; }
+    if (d_v0y) { cudaFree(d_v0y); d_v0y = nullptr; }
+    if (d_v0z) { cudaFree(d_v0z); d_v0z = nullptr; }
+    if (d_v1x) { cudaFree(d_v1x); d_v1x = nullptr; }
+    if (d_v1y) { cudaFree(d_v1y); d_v1y = nullptr; }
+    if (d_v1z) { cudaFree(d_v1z); d_v1z = nullptr; }
+    if (d_v2x) { cudaFree(d_v2x); d_v2x = nullptr; }
+    if (d_v2y) { cudaFree(d_v2y); d_v2y = nullptr; }
+    if (d_v2z) { cudaFree(d_v2z); d_v2z = nullptr; }
+    if (d_triBBoxes) { cudaFree(d_triBBoxes); d_triBBoxes = nullptr; }
+    if (d_centroids) { cudaFree(d_centroids); d_centroids = nullptr; }
+    if (d_mortonCodes) { cudaFree(d_mortonCodes); d_mortonCodes = nullptr; }
+    if (d_indices) { cudaFree(d_indices); d_indices = nullptr; }
+    if (d_nodes) { cudaFree(d_nodes); d_nodes = nullptr; }
+    if (d_atomicFlags) { cudaFree(d_atomicFlags); d_atomicFlags = nullptr; }
+    if (d_boundsReduction) { cudaFree(d_boundsReduction); d_boundsReduction = nullptr; }
+}
+
 TrianglesSoADevice LBVHBuilderCUDA::getDevicePtrs() {
     return {d_v0x, d_v0y, d_v0z, d_v1x, d_v1y, d_v1z, d_v2x, d_v2y, d_v2z};
 }
 
 void LBVHBuilderCUDA::prepareData(const TriangleMesh& tris) {
+    // Free any previous allocations before allocating new ones
+    cleanup();
+    
     numTriangles = tris.size();
     if (numTriangles == 0) return;
 

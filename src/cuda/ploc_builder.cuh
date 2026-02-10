@@ -47,7 +47,6 @@ private:
     float time_merge;
     float time_compact;
 
-    void cleanup();
     void allocate(size_t n);
 
     int radius;
@@ -62,4 +61,7 @@ public:
     const std::vector<uint32_t>& getIndices() const override;
     float getLastBuildTimeMS() const override;
     std::string getTimingBreakdown() const override;
+    
+    // Memory management
+    void cleanup();
 };

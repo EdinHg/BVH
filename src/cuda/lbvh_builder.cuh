@@ -59,4 +59,7 @@ public:
     const std::vector<uint32_t>& getIndices() const override { return h_indices; }
     float getLastBuildTimeMS() const override { return lastBuildTimeMs; }
     std::string getTimingBreakdown() const override;
+    
+    // Memory management
+    void cleanup();
 };
