@@ -8,6 +8,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <cstdint>
 
 // Statistics for a single test run
 struct TestResult {
@@ -24,6 +25,7 @@ struct TestResult {
     float throughput;
     float renderTimeMs;
     float avgNodesVisited;
+    uint64_t totalRays;
     bool success;
     std::string errorMsg;
 };
@@ -59,6 +61,7 @@ struct AggregatedStats {
     bool hasRenderStats;
     float meanRenderTime;
     float meanNodesVisited;
+    float meanRaysPerSec;  // Million rays per second
 };
 
 // Batch test runner with progress tracking and result export

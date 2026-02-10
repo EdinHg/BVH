@@ -152,11 +152,13 @@ void BatchRunner::testAlgorithm(BVHBuilder* builder,
                     // Store render statistics
                     result.renderTimeMs = rStats.renderTimeMs;
                     result.avgNodesVisited = rStats.avgNodesVisited;
+                    result.totalRays = rStats.totalRays;
                 } catch (const std::exception& e) {
                     // Rendering failed, but build succeeded
                     // Set render values to 0 (will appear as N/A in CSV)
                     result.renderTimeMs = 0.0f;
                     result.avgNodesVisited = 0.0f;
+                    result.totalRays = 0;
                     if (!quiet) {
                         std::cerr << "    Warning: Rendering failed - " << e.what() << "\n";
                     }
@@ -165,6 +167,7 @@ void BatchRunner::testAlgorithm(BVHBuilder* builder,
                 // Rendering disabled, keep default values
                 result.renderTimeMs = 0.0f;
                 result.avgNodesVisited = 0.0f;
+                result.totalRays = 0;
             }
             
             if (!quiet) {
@@ -314,6 +317,15 @@ std::vector<AggregatedStats> BatchRunner::calculateAggregatedStats(const BatchCo
             float dummy1, dummy2, dummy3;
             calcStats(renderTimes, agg.meanRenderTime, dummy1, dummy2, dummy3);
             calcStats(nodesVisited, agg.meanNodesVisited, dummy1, dummy2, dummy3);
+            
+            // Calculate Mrays/sec: (totalRays / 1,000,000) / (renderTimeMs / 1000)
+            // = totalRays / (renderTimeMs * 1000)
+            uint64_t totalRays = testResults[0].totalRays;  // Same for all iterations
+            if (agg.meanRenderTime > 0.0f && totalRays > 0) {
+                agg.meanRaysPerSec = (totalRays / 1000000.0f) / (agg.meanRenderTime / 1000.0f);
+            } else {
+                agg.meanRaysPerSec = 0.0f;
+            }
         }
         
         stats.push_back(agg);
@@ -344,7 +356,8 @@ void BatchRunner::exportSummaryCSV(const std::string& filename, const BatchConfi
         << "MeanBuildTime_ms,StdDevBuildTime_ms,MinBuildTime_ms,MaxBuildTime_ms,"
         << "MeanSAHCost,StdDevSAHCost,"
         << "MeanThroughput_MTris_s,StdDevThroughput_MTris_s,"
-        << "NodeCount,LeafCount,MaxDepth,AvgLeafDepth\n";
+        << "NodeCount,LeafCount,MaxDepth,AvgLeafDepth,"
+        << "MeanRenderTime_ms,MeanNodesVisited,MeanMRays_s\n";
     
     // Data rows
     for (const auto& agg : aggStats) {
@@ -363,7 +376,17 @@ void BatchRunner::exportSummaryCSV(const std::string& filename, const BatchConfi
             << agg.nodeCount << ","
             << agg.leafCount << ","
             << agg.maxDepth << ","
-            << std::fixed << std::setprecision(2) << agg.avgLeafDepth << "\n";
+            << std::fixed << std::setprecision(2) << agg.avgLeafDepth << ",";
+        
+        // Render stats (if available)
+        if (agg.hasRenderStats) {
+            csv << std::fixed << std::setprecision(2) << agg.meanRenderTime << ","
+                << std::fixed << std::setprecision(2) << agg.meanNodesVisited << ","
+                << std::fixed << std::setprecision(2) << agg.meanRaysPerSec;
+        } else {
+            csv << "N/A,N/A,N/A";
+        }
+        csv << "\n";
     }
     
     csv.close();
