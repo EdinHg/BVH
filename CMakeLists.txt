@@ -13,6 +13,8 @@ set(SOURCES
     src/main.cpp
     src/loader.cpp
     src/evaluator.cpp
+    src/batch_config.cpp
+    src/batch_runner.cpp
     src/render_engine.cu
     src/cuda/lbvh_builder.cu
     src/cuda/lbvh_plus_builder.cu
