@@ -269,16 +269,39 @@ BatchConfig loadBatchConfig(const std::string& filename) {
         config.plocRadius = {10, 25, 100};
     }
     
-    // Load render configuration
-    if (jsonContent.find("\"render\"") != std::string::npos) {
-        config.render.enabled = parser.getBoolean("render_enabled", false);
-        config.render.prefix = parser.getString("render_prefix");
-        config.render.size = parser.getString("render_size");
-        config.render.shading = parser.getString("render_shading");
-        config.render.camera = parser.getString("render_camera");
-        config.render.cameraUp = parser.getString("render_camera_up");
-        config.render.fov = parser.getFloat("render_fov", 0.0f);
-    }
+     // Load render configuration (nested object)
+     if (jsonContent.find("\"render\"") != std::string::npos) {
+         // Extract render object substring
+         size_t renderPos = jsonContent.find("\"render\"");
+         if (renderPos != std::string::npos) {
+             // Find the opening brace
+             size_t braceStart = jsonContent.find('{', renderPos);
+             if (braceStart != std::string::npos) {
+                 // Find matching closing brace
+                 int braceCount = 0;
+                 size_t braceEnd = braceStart;
+                 for (; braceEnd < jsonContent.length(); ++braceEnd) {
+                     if (jsonContent[braceEnd] == '{') ++braceCount;
+                     else if (jsonContent[braceEnd] == '}') {
+                         --braceCount;
+                         if (braceCount == 0) break;
+                     }
+                 }
+                 
+                 // Parse the render object
+                 std::string renderObjStr = jsonContent.substr(braceStart, braceEnd - braceStart + 1);
+                 SimpleJsonParser renderParser(renderObjStr);
+                 
+                 config.render.enabled = renderParser.getBoolean("enabled", false);
+                 config.render.prefix = renderParser.getString("prefix");
+                 config.render.size = renderParser.getString("size");
+                 config.render.shading = renderParser.getString("shading");
+                 config.render.camera = renderParser.getString("camera");
+                 config.render.cameraUp = renderParser.getString("camera_up");
+                 config.render.fov = renderParser.getFloat("fov", 0.0f);
+             }
+         }
+     }
     
     // Load models
     std::vector<std::string> modelObjStrs = parser.getObjectArray("models");

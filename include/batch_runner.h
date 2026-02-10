@@ -3,6 +3,7 @@
 #include "batch_config.h"
 #include "mesh.h"
 #include "bvh_builder.h"
+#include "render_engine.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -79,14 +80,15 @@ private:
     // Load a single model from config
     TriangleMesh loadModel(const ModelConfig& model);
     
-    // Test a single builder on a mesh for multiple iterations
-    void testAlgorithm(BVHBuilder* builder,
-                       const TriangleMesh& mesh,
-                       const std::string& modelName,
-                       int modelTriangles,
-                       int iterations,
-                       bool warmup,
-                       bool quiet);
+     // Test a single builder on a mesh for multiple iterations
+     void testAlgorithm(BVHBuilder* builder,
+                        const TriangleMesh& mesh,
+                        const std::string& modelName,
+                        int modelTriangles,
+                        int iterations,
+                        bool warmup,
+                        bool quiet,
+                        const BatchRenderConfig& renderConfig);
     
     // Create all builders from algorithm list and PLOC radius values
     std::vector<BuilderPair> createBuilders(const BatchConfig& config);

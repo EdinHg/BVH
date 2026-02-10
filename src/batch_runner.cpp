@@ -16,6 +16,23 @@
 TriangleMesh loadOBJ(const std::string& filename);
 TriangleMesh generateRandomTriangles(int count);
 
+// Helper function to parse render size string (e.g., "1024x768" -> width=1024, height=768)
+static void parseRenderSize(const std::string& sizeStr, int& width, int& height) {
+    size_t xPos = sizeStr.find('x');
+    if (xPos != std::string::npos) {
+        try {
+            width = std::stoi(sizeStr.substr(0, xPos));
+            height = std::stoi(sizeStr.substr(xPos + 1));
+        } catch (...) {
+            width = 1024;
+            height = 768;
+        }
+    } else {
+        width = 1024;
+        height = 768;
+    }
+}
+
 BatchRunner::BatchRunner() = default;
 
 TriangleMesh BatchRunner::loadModel(const ModelConfig& model) {
@@ -59,7 +76,8 @@ void BatchRunner::testAlgorithm(BVHBuilder* builder,
                                  int modelTriangles,
                                  int iterations,
                                  bool warmup,
-                                 bool quiet) {
+                                 bool quiet,
+                                 const BatchRenderConfig& renderConfig) {
     // Warmup iteration (not recorded)
     if (warmup) {
         try {
@@ -99,9 +117,55 @@ void BatchRunner::testAlgorithm(BVHBuilder* builder,
             result.maxDepth = stats.maxDepth;
             result.avgLeafDepth = stats.avgLeafDepth;
             result.throughput = (mesh.size() / 1e6f) / (stats.buildTimeMs / 1000.0f);
-            result.renderTimeMs = 0.0f;
-            result.avgNodesVisited = 0.0f;
             result.success = true;
+            
+            // Perform rendering if enabled
+            if (renderConfig.enabled) {
+                try {
+                    // Parse render configuration
+                    int renderWidth = 1024, renderHeight = 768;
+                    parseRenderSize(renderConfig.size, renderWidth, renderHeight);
+                    
+                    // Get BVH nodes
+                    const auto& nodes = builder->getNodes();
+                    
+                    // Parse camera (auto-fit if not specified)
+                    Camera camera = parseCameraString(
+                        renderConfig.camera,
+                        renderConfig.cameraUp,
+                        renderConfig.fov > 0.0f ? renderConfig.fov : 60.0f,
+                        nodes
+                    );
+                    
+                    // Parse shading mode (default to NORMAL)
+                    ShadingMode mode = parseShadingMode(renderConfig.shading);
+                    
+                    // Render WITHOUT saving image file (empty filename = no file output)
+                    // We only want statistics during batch testing
+                    RenderStats rStats = renderImage(
+                        nodes, mesh, renderWidth, renderHeight,
+                        camera, mode,
+                        "",    // No file output during batch testing
+                        0.0f   // Auto heatmap max
+                    );
+                    
+                    // Store render statistics
+                    result.renderTimeMs = rStats.renderTimeMs;
+                    result.avgNodesVisited = rStats.avgNodesVisited;
+                } catch (const std::exception& e) {
+                    // Rendering failed, but build succeeded
+                    // Set render values to 0 (will appear as N/A in CSV)
+                    result.renderTimeMs = 0.0f;
+                    result.avgNodesVisited = 0.0f;
+                    if (!quiet) {
+                        std::cerr << "    Warning: Rendering failed - " << e.what() << "\n";
+                    }
+                }
+            } else {
+                // Rendering disabled, keep default values
+                result.renderTimeMs = 0.0f;
+                result.avgNodesVisited = 0.0f;
+            }
             
             if (!quiet) {
                 printProgress(modelName, builder->getName(), i, iterations, true, "OK");
@@ -374,7 +438,7 @@ void BatchRunner::run(const BatchConfig& config) {
             
             try {
                 testAlgorithm(builderPair.builder, mesh, modelConfig.name, mesh.size(),
-                              config.iterations, config.warmup, config.quiet);
+                              config.iterations, config.warmup, config.quiet, config.render);
                 completedTests += config.iterations;
             } catch (const std::exception& e) {
                 if (!config.quiet) {
