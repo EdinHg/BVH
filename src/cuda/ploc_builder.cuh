@@ -46,8 +46,10 @@ private:
     float time_search;
     float time_merge;
     float time_compact;
+    float time_reorder;
 
     void allocate(size_t n);
+    void reorderDFS();
 
     int radius;
 

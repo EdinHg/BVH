@@ -5,6 +5,7 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <chrono>
 
 // --- Device Helpers ---
 
@@ -308,11 +309,77 @@ PLOCBuilderCUDA::PLOCBuilderCUDA(int r) :
     d_cluster_aabbs_swap(nullptr), d_cluster_indices_swap(nullptr),
     d_temp_storage(nullptr), temp_storage_bytes(0),
     lastBuildTimeMs(0.0f),
-    time_init(0.0f), time_search(0.0f), time_merge(0.0f), time_compact(0.0f)
+    time_init(0.0f), time_search(0.0f), time_merge(0.0f), time_compact(0.0f), time_reorder(0.0f)
 {}
 
 PLOCBuilderCUDA::~PLOCBuilderCUDA() {
     cleanup();
+}
+
+void PLOCBuilderCUDA::reorderDFS() {
+    // Reorder nodes in depth-first preorder for cache coherence during traversal.
+    // Root is already at index 0. We walk the tree iteratively and build a new
+    // node array where each node's children immediately follow it (or are nearby).
+    
+    if (h_final_nodes.empty()) return;
+    
+    int totalNodes = (int)h_final_nodes.size();
+    std::vector<BVHNode> new_nodes;
+    new_nodes.reserve(totalNodes);
+    
+    // old_to_new[old_idx] = new_idx
+    std::vector<int> old_to_new(totalNodes, -1);
+    
+    // Iterative DFS using explicit stack
+    std::vector<int> stack;
+    stack.reserve(128); // Match traversal kernel stack size
+    stack.push_back(0); // Start from root
+    
+    while (!stack.empty()) {
+        int old_idx = stack.back();
+        stack.pop_back();
+        
+        if (old_idx < 0 || old_idx >= totalNodes) continue;
+        
+        // Assign next sequential index in DFS order
+        int new_idx = (int)new_nodes.size();
+        old_to_new[old_idx] = new_idx;
+        new_nodes.push_back(h_final_nodes[old_idx]);
+        
+        const BVHNode& node = h_final_nodes[old_idx];
+        
+        // If internal node, push children (right first so left gets lower index)
+        if (!node.isLeaf()) {
+            int left = node.leftChild;
+            int right = node.rightChild;
+            
+            // Push right child first (will be processed after left)
+            if (right >= 0 && right < totalNodes) {
+                stack.push_back(right);
+            }
+            // Push left child second (will be processed first - LIFO)
+            if (left >= 0 && left < totalNodes) {
+                stack.push_back(left);
+            }
+        }
+    }
+    
+    // Now remap all child pointers in the new array
+    for (auto& node : new_nodes) {
+        if (!node.isLeaf()) {
+            // Remap leftChild and rightChild through old_to_new mapping
+            if (node.leftChild >= 0 && node.leftChild < totalNodes) {
+                node.leftChild = old_to_new[node.leftChild];
+            }
+            if (node.rightChild >= 0 && node.rightChild < totalNodes) {
+                node.rightChild = old_to_new[node.rightChild];
+            }
+        }
+        // Leaf nodes: leftChild contains primitive index with high bit set, no remapping needed
+    }
+    
+    // Replace old array with reordered one
+    h_final_nodes = std::move(new_nodes);
 }
 
 void PLOCBuilderCUDA::cleanup() {
@@ -396,7 +463,8 @@ std::string PLOCBuilderCUDA::getTimingBreakdown() const {
     oss << "  Initialization:   " << time_init << " ms\n";
     oss << "  NN Search (Red):  " << time_search << " ms\n";
     oss << "  Merging (Green):  " << time_merge << " ms\n";
-    oss << "  Compaction (Mag): " << time_compact << " ms";
+    oss << "  Compaction (Mag): " << time_compact << " ms\n";
+    oss << "  DFS Reordering:   " << time_reorder << " ms";
     return oss.str();
 }
 
@@ -411,6 +479,7 @@ void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
     time_search = 0;
     time_merge = 0;
     time_compact = 0;
+    time_reorder = 0;
     
     float temp_ms = 0;
 
@@ -546,10 +615,6 @@ void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
 
         current_n = new_n;
     }
-    
-    // Calculate total purely based on accumulated + init?
-    // Or simpler: Total = init + search + merge + compact
-    lastBuildTimeMs = time_init + time_search + time_merge + time_compact;
 
     int num_allocated_nodes;
     cudaMemcpy(&num_allocated_nodes, d_next_node_idx, sizeof(int), cudaMemcpyDeviceToHost);
@@ -580,6 +645,16 @@ void PLOCBuilderCUDA::build(const TriangleMesh& mesh) {
             }
         }
     }
+    
+    // --- DFS REORDERING PHASE ---
+    // Reorder nodes for cache coherence during traversal
+    auto reorder_start = std::chrono::high_resolution_clock::now();
+    reorderDFS();
+    auto reorder_end = std::chrono::high_resolution_clock::now();
+    time_reorder = std::chrono::duration<float, std::milli>(reorder_end - reorder_start).count();
+    
+    // Calculate total build time including all phases
+    lastBuildTimeMs = time_init + time_search + time_merge + time_compact + time_reorder;
     
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
