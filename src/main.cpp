@@ -33,6 +33,10 @@ struct StoredBVHStats {
     BVHStats stats;
     float throughput;
     std::string timingBreakdown;
+    bool hasRenderStats;
+    RenderStats renderStats;
+    
+    StoredBVHStats() : hasRenderStats(false) {}
 };
 
 void exportBVHToBinary(const std::string& filename, const std::vector<BVHNode>& nodes) {
@@ -119,6 +123,7 @@ void printUsage(const char* programName) {
     std::cout << "  -c, --colab-export        Export as binary (for Colab visualization)\n";
     std::cout << "  -l, --leaves-only         Export only leaf bounding boxes\n";
     std::cout << "  -r, --radius <value>      Set search radius for PLOC (default: 25)\n";
+    std::cout << "  --csv-export <file>       Export statistics to CSV file\n";
     std::cout << "  -h, --help                Show this help\n\n";
     std::cout << "Render options:\n";
     std::cout << "  --render <prefix>         Render each BVH to <prefix>_<algo>.ppm\n";
@@ -133,12 +138,66 @@ void printUsage(const char* programName) {
     std::cout << "  " << programName << " -n 1000000 -o bvh.bin -c\n";
     std::cout << "  " << programName << " -i bunny.obj --render output --shading heatmap\n";
     std::cout << "  " << programName << " -i bunny.obj --render img --camera 0,1,3,0,0,0 --fov 45\n";
+    std::cout << "  " << programName << " -n 1000000 --csv-export stats.csv\n";
+}
+
+// Export statistics to CSV file
+void exportStatsToCSV(const std::string& filename, 
+                      const std::vector<StoredBVHStats>& allStats,
+                      int numTriangles) {
+    std::ofstream csv(filename);
+    if (!csv.is_open()) {
+        std::cerr << "Error: Could not open CSV file for writing: " << filename << "\n";
+        return;
+    }
+    
+    // Write header
+    csv << "Algorithm,NumTriangles,BuildTimeMs,SAHCost,Throughput_MTris_s";
+    csv << ",NodeCount,LeafCount,MaxDepth,AvgLeafDepth";
+    csv << ",RenderTimeMs,AvgNodesVisited,MaxNodesVisited,AvgAABBTests,AvgTriTests";
+    csv << ",TimingBreakdown\n";
+    
+    // Write data rows
+    for (const auto& stored : allStats) {
+        csv << stored.algorithmName << ","
+            << numTriangles << ","
+            << std::fixed << std::setprecision(3) << stored.stats.buildTimeMs << ","
+            << std::fixed << std::setprecision(2) << stored.stats.sahCost << ","
+            << std::fixed << std::setprecision(2) << stored.throughput << ","
+            << stored.stats.nodeCount << ","
+            << stored.stats.leafCount << ","
+            << stored.stats.maxDepth << ","
+            << std::fixed << std::setprecision(2) << stored.stats.avgLeafDepth << ",";
+        
+        // Render stats (if available)
+        if (stored.hasRenderStats) {
+            csv << std::fixed << std::setprecision(3) << stored.renderStats.renderTimeMs << ","
+                << std::fixed << std::setprecision(2) << stored.renderStats.avgNodesVisited << ","
+                << std::fixed << std::setprecision(2) << stored.renderStats.maxNodesVisited << ","
+                << std::fixed << std::setprecision(2) << stored.renderStats.avgAABBTests << ","
+                << std::fixed << std::setprecision(2) << stored.renderStats.avgTriTests << ",";
+        } else {
+            csv << "N/A,N/A,N/A,N/A,N/A,";
+        }
+        
+        // Timing breakdown (escape quotes and newlines for CSV)
+        std::string breakdown = stored.timingBreakdown;
+        // Replace newlines with semicolons for better CSV readability
+        for (char& c : breakdown) {
+            if (c == '\n') c = ';';
+        }
+        csv << "\"" << breakdown << "\"\n";
+    }
+    
+    csv.close();
+    std::cout << "\nStatistics exported to: " << filename << "\n";
 }
 
 int main(int argc, char** argv) {
     // Parse command-line arguments
     std::string selectedAlgo = "all";
     std::string outputFile;
+    std::string csvExportFile;
     bool colabExport = false;
     bool leavesOnly = false;
     int radius = 0; // 0 means default/not set
@@ -171,6 +230,9 @@ int main(int argc, char** argv) {
         }
         else if ((arg == "-r" || arg == "--radius") && i + 1 < argc) {
             radius = std::stoi(argv[++i]);
+        }
+        else if (arg == "--csv-export" && i + 1 < argc) {
+            csvExportFile = argv[++i];
         }
         else if (arg == "--render" && i + 1 < argc) {
             renderPrefix = argv[++i];
@@ -377,6 +439,10 @@ int main(int argc, char** argv) {
                     );
                     printRenderStats(builder->getName(), rStats);
                     std::cout << "\n";
+                    
+                    // Store render stats for CSV export
+                    allStats.back().hasRenderStats = true;
+                    allStats.back().renderStats = rStats;
                 }
             }
             
@@ -420,6 +486,11 @@ int main(int argc, char** argv) {
     
     for (const auto& stored : allStats) {
         BVHEvaluator::printStats(stored.algorithmName, stored.stats);
+    }
+
+    // 7. Export to CSV if requested
+    if (!csvExportFile.empty()) {
+        exportStatsToCSV(csvExportFile, allStats, mesh.size());
     }
 
     std::cout << "\n========================================\n";

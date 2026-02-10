@@ -39,8 +39,6 @@
 // Turbo Colormap Lookup Table (Google Research)
 // ============================================================================
 // Source: https://research.google/blog/turbo-an-improved-rainbow-colormap-for-visualization/
-// 256-entry sRGB colormap: improved rainbow with better perceptual uniformity,
-// no banding, and color blind accessibility (99.997% of population).
 
 static const float kTurboColormap[256][3] = {
     {0.18995f,0.07176f,0.23217f},{0.19483f,0.08339f,0.26149f},{0.19956f,0.09498f,0.29024f},{0.20415f,0.10652f,0.31844f},
@@ -147,7 +145,7 @@ __device__ __host__ inline float3_cw d_negate(const float3_cw& v) {
 struct Ray {
     float3_cw origin;
     float3_cw direction;
-    float3_cw invDirection; // Precomputed 1/dir for slab AABB test
+    float3_cw invDirection; 
 };
 
 // ============================================================================
