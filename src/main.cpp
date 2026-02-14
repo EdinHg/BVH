@@ -18,10 +18,9 @@
 #include <algorithm>
 #include <cctype>
 
-// Forward declarations from loader.cpp
 TriangleMesh loadMesh(int argc, char** argv);
 
-// Export helpers
+// Export helper
 struct VizNode {
     float min[3];
     float max[3];
@@ -29,7 +28,7 @@ struct VizNode {
     int rightIdx;
 };
 
-// Minimal statistics storage for memory-efficient benchmarking
+// Minimal statistics 
 struct StoredBVHStats {
     std::string algorithmName;
     BVHStats stats;
@@ -99,7 +98,6 @@ void exportBVHToOBJ(const std::string& filename, const std::vector<BVHNode>& nod
     }
 }
 
-// Sanitize algorithm name for use as a filename component
 static std::string sanitizeName(const std::string& name) {
     std::string result;
     for (char c : name) {
@@ -109,7 +107,7 @@ static std::string sanitizeName(const std::string& name) {
             result += '_';
         }
     }
-    // Remove trailing underscores
+    
     while (!result.empty() && result.back() == '_') result.pop_back();
     return result;
 }
@@ -197,7 +195,6 @@ void exportStatsToCSV(const std::string& filename,
 }
 
 int main(int argc, char** argv) {
-    // Check for batch mode first
     std::string batchConfigFile;
     bool batchQuiet = false;
     
@@ -225,13 +222,12 @@ int main(int argc, char** argv) {
         }
     }
     
-    // Parse command-line arguments for interactive mode
     std::string selectedAlgo = "all";
     std::string outputFile;
     std::string csvExportFile;
     bool colabExport = false;
     bool leavesOnly = false;
-    int radius = 0; // 0 means default/not set
+    int radius = 0; 
 
     // Render options
     std::string renderPrefix;
@@ -239,7 +235,7 @@ int main(int argc, char** argv) {
     std::string shadingStr = "normal";
     std::string cameraStr;
     std::string cameraUpStr;
-    float fov = 0.0f; // 0 means use default (60)
+    float fov = 0.0f; 
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -334,9 +330,6 @@ int main(int argc, char** argv) {
         if (radius > 0) {
             builders.push_back(std::make_unique<PLOCBuilderCUDA>(radius));
         } else {
-             // If manual run without radius, simulate benchmark mode or default? 
-             // "utilize 3 different values... during benchmark"
-             // I'll add all 3 for consistency if no radius is specified, so user sees the comparison.
             builders.push_back(std::make_unique<PLOCBuilderCUDA>(10));
             builders.push_back(std::make_unique<PLOCBuilderCUDA>(25));
             builders.push_back(std::make_unique<PLOCBuilderCUDA>(100));
@@ -373,14 +366,13 @@ int main(int argc, char** argv) {
                 const auto& nodes = builder->getNodes();
                 if (nodes.empty()) continue;
                 
-                // Compute camera on first builder
                 if (globalHeatmapMax == 0.0f) {
                     camera = parseCameraString(cameraStr, cameraUpStr, fov, nodes);
                 }
                 
                 RenderStats preStats = renderImage(
                     nodes, mesh, renderWidth, renderHeight,
-                    camera, shadingMode, "", 0.0f // Empty output, auto-normalize
+                    camera, shadingMode, "", 0.0f 
                 );
                 globalHeatmapMax = std::max(globalHeatmapMax, preStats.maxNodesVisited);
                 
@@ -397,8 +389,6 @@ int main(int argc, char** argv) {
         std::cout << "Proceeding with main benchmark...\n\n";
     }
     
-    // 5. Main Sequential Loop: Build → Evaluate → Render → Export → Free
-    //    This ensures only one BVH exists in memory at a time
     std::vector<StoredBVHStats> allStats;
     std::string exportAlgoName;
     
@@ -410,11 +400,10 @@ int main(int argc, char** argv) {
         auto& builder = builders[builderIdx];
         
         try {
-            // 5a. Build and evaluate BVH
+            // Build and evaluate BVH
             BVHStats stats = BVHEvaluator::evaluate(builder.get(), mesh);
             float throughput = (mesh.size() / 1e6f) / (stats.buildTimeMs / 1000.0f);
             
-            // Store stats for later printing (memory-efficient: no BVH nodes stored)
             StoredBVHStats stored;
             stored.algorithmName = builder->getName();
             stored.stats = stats;
@@ -422,13 +411,11 @@ int main(int argc, char** argv) {
             stored.timingBreakdown = builder->getTimingBreakdown();
             allStats.push_back(stored);
             
-            // Print summary row
             std::cout << "│ " << std::setw(16) << std::left << builder->getName() 
                       << " │ " << std::setw(55) << std::right << std::fixed << std::setprecision(3) << stats.buildTimeMs 
                       << " │ " << std::setw(12) << std::fixed << std::setprecision(2) << stats.sahCost 
                       << " │ " << std::setw(24) << std::fixed << std::setprecision(2) << throughput << " │\n";
             
-            // Print detailed timing breakdown if available
             if (!stored.timingBreakdown.empty()) {
                 std::cout << "│                  │ Breakdown:                                              │              │                          │\n";
                 std::istringstream iss(stored.timingBreakdown);
@@ -443,14 +430,13 @@ int main(int argc, char** argv) {
             
             std::cout << "├──────────────────┼─────────────────────────────────────────────────────────┼──────────────┼──────────────────────────┤\n";
             
-            // 5b. Render if requested
+            // Render if requested
             if (needRendering) {
                 const auto& nodes = builder->getNodes();
                 if (nodes.empty()) {
                     std::cerr << "Warning: Skipping render for " << builder->getName()
                               << ": no BVH nodes\n";
                 } else {
-                    // Compute camera once (on first builder for non-heatmap)
                     if (builderIdx == 0 && shadingMode != ShadingMode::HEATMAP) {
                         camera = parseCameraString(cameraStr, cameraUpStr, fov, nodes);
                         std::cout << "\n[Rendering: Camera eye=("
@@ -471,13 +457,11 @@ int main(int argc, char** argv) {
                     printRenderStats(builder->getName(), rStats);
                     std::cout << "\n";
                     
-                    // Store render stats for CSV export
                     allStats.back().hasRenderStats = true;
                     allStats.back().renderStats = rStats;
                 }
             }
             
-            // 5c. Export BVH if requested (first or PLOC r=25)
             if (!outputFile.empty() && exportAlgoName.empty()) {
                 bool shouldExport = (builderIdx == 0) || 
                                     (builder->getName() == "PLOC CUDA (r=25)");
@@ -499,8 +483,6 @@ int main(int argc, char** argv) {
                 }
             }
             
-            // 5d. Memory cleanup happens automatically when next builder->build() is called
-            //     or when the builder goes out of scope
             
         } catch (const std::exception& e) {
             std::cerr << "Error processing " << builder->getName() << ": " << e.what() << "\n";
@@ -510,7 +492,6 @@ int main(int argc, char** argv) {
     
     std::cout << "└──────────────────┴─────────────────────────────────────────────────────────┴──────────────┴──────────────────────────┘\n\n";
 
-    // 6. Print detailed statistics from stored data (no re-building needed)
     std::cout << "========================================\n";
     std::cout << "  Detailed Statistics\n";
     std::cout << "========================================\n";
@@ -519,7 +500,6 @@ int main(int argc, char** argv) {
         BVHEvaluator::printStats(stored.algorithmName, stored.stats);
     }
 
-    // 7. Export to CSV if requested
     if (!csvExportFile.empty()) {
         exportStatsToCSV(csvExportFile, allStats, mesh.size());
     }

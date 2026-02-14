@@ -7,18 +7,28 @@
   "ploc_radius": [10, 25, 100],
   "models": [
     {
-      "type": "random",
-      "triangles": 1000000,
-      "name": "random_1M"
-    },
-    {
-      "type": "random",
-      "triangles": 5000000,
-      "name": "random_5M"
+      "type": "obj",
+      "path": "models/buddha.obj"
     },
     {
       "type": "obj",
-      "path": "models/bunny.obj"
+      "path": "models/conference.obj"
+    },
+    {
+      "type": "obj",
+      "path": "models/sponza.obj"
+    },
+    {
+      "type": "obj",
+      "path": "models/gallery.obj"
+    },
+    {
+      "type": "obj",
+      "path": "models/hairball.obj"
+    },
+    {
+      "type": "obj",
+      "path": "models/powerplant.obj"
     },
     {
       "type": "obj",

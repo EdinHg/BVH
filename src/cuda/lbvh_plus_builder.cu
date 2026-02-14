@@ -17,7 +17,6 @@ namespace {
 // 60-bit Morton Codes (20 bits per axis)
 // -----------------------------------------------------------------------------
 
-// Expands a 21-bit integer into 63 bits by inserting 2 zeros after each bit.
 __device__ __forceinline__ uint64_t expandBits_P(uint64_t v) {
     v &= 0x1fffff;
     v = (v | v << 32) & 0x1f00000000ffffull;
@@ -29,7 +28,6 @@ __device__ __forceinline__ uint64_t expandBits_P(uint64_t v) {
 }
 
 __device__ __forceinline__ uint64_t morton3D_P(float x, float y, float z) {
-    // Range [0, 1] -> [0, 1048575] (2^20 - 1)
     x = fminf(fmaxf(x * 1048576.0f, 0.0f), 1048575.0f);
     y = fminf(fmaxf(y * 1048576.0f, 0.0f), 1048575.0f);
     z = fminf(fmaxf(z * 1048576.0f, 0.0f), 1048575.0f);
@@ -80,8 +78,7 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
     activeBoxes[0] = nodes[rootIdx].bbox;
     leafCount = 1;
     
-    // Greedy expansion to find leaves
-    // This finds nodes with largest surface area to expand
+    // finds nodes with largest surface area to expand
     for (int step = 0; step < MAX_TREELET_SIZE - 1; ++step) {
         int bestIdx = -1;
         float maxArea = -1.0f;
@@ -108,11 +105,9 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
         uint32_t left = expandedNode.leftChild;
         uint32_t right = expandedNode.rightChild;
         
-        // Overwrite bestIdx with Left child
         activeNodeIdx[bestIdx] = left;
         activeBoxes[bestIdx] = nodes[left].bbox;
         
-        // Append Right child
         activeNodeIdx[leafCount] = right;
         activeBoxes[leafCount] = nodes[right].bbox;
         leafCount++;
@@ -121,14 +116,12 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
     int n = leafCount;
     if (n < 2) return; 
 
-    // 2. Compute Costs (DP)
-    float cost[128]; // 1<<7
+    // 2. Compute Costs
+    float cost[128]; 
     uint8_t partition[128];
     
-    // Precompute Areas and Base Costs
     for (int s = 1; s < (1 << n); ++s) {
         if (__popc(s) == 1) {
-            // Leaf subset -> Cost 0 (for optimization purposes)
             cost[s] = 0.0f;
         } else {
             cost[s] = INF;
@@ -137,12 +130,8 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
 
     // DP Loop by size k
     for (int k = 2; k <= n; ++k) {
-        // Iterate only subsets of size k.
-        // For n=7, loop 1..127. Check popcount.
         for (int s = 1; s < (1 << n); ++s) {
             if (__popc(s) == k) {
-                // Compute Area of subset S
-                // (Optimized: could memoize area too, but memory is tight)
                 AABB_cw box; 
                 for (int i = 0; i < n; ++i) {
                     if ((s >> i) & 1) {
@@ -151,7 +140,6 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
                 }
                 float areaS = box.surfaceArea();
                 
-                // Find best split
                 float minCost = INF;
                 int bestP = -1;
                 
@@ -169,14 +157,13 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
                     p = (p - delta) & s;
                 } while (p != 0);
                 
-                float Ci = 1.0f; // Internal node cost factor
+                float Ci = 1.0f; 
                 cost[s] = minCost + Ci * areaS;
                 partition[s] = (uint8_t)bestP;
             }
         }
     }
     
-    // Rebuild topology with optimal partitions
     int availableNodes[MAX_TREELET_SIZE]; 
     int availCount = 0;
     
@@ -184,11 +171,9 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
     int top = 0;
     stack[top++] = rootIdx;
     
-    // DFS to find internal nodes
     while(top > 0) {
         int curr = stack[--top];
         
-        // Check if curr is a leaf of the treelet
         bool isLeafInTreelet = false;
         for(int i=0; i<n; ++i) {
             if(activeNodeIdx[i] == curr) {
@@ -205,9 +190,6 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
         }
     }
     
-    // Assert availCount == n-1 ?
-    // If n=7 leaves, we need 6 internal nodes.
-    // availableNodes[0] should be rootIdx.
     
     struct Task {
         int mask;
@@ -218,7 +200,6 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
     int qTail = 0; 
     
     int fullMask = (1 << n) - 1;
-    // availableNodes[0] is rootIdx.
     queue[qTail++] = {fullMask, availableNodes[0]};
     int usedNodes = 1;
 
@@ -232,16 +213,14 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
         
         int leftNodeIdx, rightNodeIdx;
         
-        // Left Child
         if (__popc(leftMask) == 1) {
-            int leafPos = __ffs(leftMask) - 1; // ffs is 1-based
+            int leafPos = __ffs(leftMask) - 1; 
             leftNodeIdx = activeNodeIdx[leafPos];
         } else {
             leftNodeIdx = availableNodes[usedNodes++];
             queue[qTail++] = {leftMask, leftNodeIdx};
         }
         
-        // Right Child
         if (__popc(rightMask) == 1) {
             int leafPos = __ffs(rightMask) - 1;
             rightNodeIdx = activeNodeIdx[leafPos];
@@ -254,7 +233,6 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
         node.leftChild = leftNodeIdx;
         node.rightChild = rightNodeIdx;
         
-        // Recompute BBox for this internal node immediately
         AABB_cw box;
         for(int i=0; i<n; ++i) {
             if((mask >> i) & 1) {
@@ -268,7 +246,7 @@ __device__ void optimizeTreeletSerial(LBVHNode* nodes, int rootIdx) {
     }
 }
 
-} // End anonymous namespace
+} 
 
 // -----------------------------------------------------------------------------
 // Kernels
@@ -303,7 +281,6 @@ __global__ void kComputeMortonCodes_P(const float3_cw* centroids, int n, AABB_cw
     float3_cw minB = sceneBounds.min;
     float3_cw extents = sceneBounds.max - sceneBounds.min;
     
-    // Normalize to [0,1]
     float nx = (c.x - minB.x) / ((extents.x > 1e-6f) ? extents.x : 1.0f);
     float ny = (c.y - minB.y) / ((extents.y > 1e-6f) ? extents.y : 1.0f);
     float nz = (c.z - minB.z) / ((extents.z > 1e-6f) ? extents.z : 1.0f);
@@ -316,7 +293,6 @@ __global__ void kBuildInternalNodes_P(const uint64_t* sortedMortonCodes, const u
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numObjects - 1) return;
 
-    // Use 64-bit Delta
     int d = (delta_P(sortedMortonCodes, sortedIndices, numObjects, i, i + 1) - 
              delta_P(sortedMortonCodes, sortedIndices, numObjects, i, i - 1)) >= 0 ? 1 : -1;
 
@@ -359,7 +335,7 @@ __global__ void kInitLeafNodes_P(LBVHNode* nodes, const AABB_cw* triBBoxes, cons
 }
 
 // -----------------------------------------------------------------------------
-// Combined Refit + Optimize Kernel (Bottom-Up)
+// Combined Refit + Optimize Kernel 
 // -----------------------------------------------------------------------------
 
 __global__ void kRefitAndOptimize(LBVHNode* nodes, int* atomicCounters, int numObjects, bool doOptimize) {
@@ -371,9 +347,9 @@ __global__ void kRefitAndOptimize(LBVHNode* nodes, int* atomicCounters, int numO
     // Bottom-up traversal
     while (idx != 0) {
         uint32_t parent = nodes[idx].parent;
-        __threadfence(); // Ensure bbox writes are globally visible before signaling
+        __threadfence(); 
         int oldVal = atomicAdd(&atomicCounters[parent], 1);
-        if (oldVal == 0) return; // First thread dies
+        if (oldVal == 0) return; 
 
         uint32_t left = nodes[parent].leftChild;
         uint32_t right = nodes[parent].rightChild;
@@ -383,9 +359,6 @@ __global__ void kRefitAndOptimize(LBVHNode* nodes, int* atomicCounters, int numO
         
         if (doOptimize) {
             optimizeTreeletSerial(nodes, parent);
-            // Optimization updates BBox of parent internally, but propagate up?
-            // The optimization function writes `node.bbox = box;` so logic is consistent.
-            // BBox IS updated.
         }
         
         idx = parent;
@@ -420,7 +393,6 @@ LBVHPlusBuilderCUDA::~LBVHPlusBuilderCUDA() {
 }
 
 void LBVHPlusBuilderCUDA::cleanup() {
-    // Free all thrust device vectors (they manage their own memory)
     d_v0x.clear(); d_v0x.shrink_to_fit();
     d_v0y.clear(); d_v0y.shrink_to_fit();
     d_v0z.clear(); d_v0z.shrink_to_fit();
@@ -438,7 +410,6 @@ void LBVHPlusBuilderCUDA::cleanup() {
     d_atomicCounters.clear(); d_atomicCounters.shrink_to_fit();
     d_subtreeSize.clear(); d_subtreeSize.shrink_to_fit();
     
-    // Ensure all CUDA operations complete before returning
     cudaDeviceSynchronize();
 }
 
@@ -451,7 +422,6 @@ TrianglesSoADevice LBVHPlusBuilderCUDA::getDevicePtrs() {
 }
 
 void LBVHPlusBuilderCUDA::prepareData(const TriangleMesh& mesh) {
-    // Free any previous allocations before allocating new ones
     cleanup();
     
     int n = mesh.size();
@@ -508,31 +478,15 @@ void LBVHPlusBuilderCUDA::runCompute(int n) {
         n);
     cudaEventRecord(e_topology);
 
-    // Initial Refit (Correct BBoxes)
+    // Initial Refit 
     thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
     kRefitAndOptimize<<<gridSize, blockSize>>>(
         thrust::raw_pointer_cast(d_nodes.data()),
         thrust::raw_pointer_cast(d_atomicCounters.data()),
-        n, false); // No optimize first
+        n, false); 
     cudaEventRecord(e_refit);
 
-    // Multi-pass Optimization
-    // Loop 3 times as requested
-    // Pass 1
-    thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
-    kRefitAndOptimize<<<gridSize, blockSize>>>(
-        thrust::raw_pointer_cast(d_nodes.data()),
-        thrust::raw_pointer_cast(d_atomicCounters.data()),
-        n, true);
-
-    // Pass 2
-    thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
-    kRefitAndOptimize<<<gridSize, blockSize>>>(
-        thrust::raw_pointer_cast(d_nodes.data()),
-        thrust::raw_pointer_cast(d_atomicCounters.data()),
-        n, true);
-
-    // Pass 3 (Final)
+    // One pass
     thrust::fill(d_atomicCounters.begin(), d_atomicCounters.end(), 0);
     kRefitAndOptimize<<<gridSize, blockSize>>>(
         thrust::raw_pointer_cast(d_nodes.data()),
